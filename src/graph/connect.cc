@@ -16,12 +16,185 @@
 /********************* Internode connection ***********************/
 /******************************************************************/
 
+// reverse an array
+static void reverse_array(int* arr, int len) {
+  for(int i = 0; i < len/2; i++) {
+    int tmp = arr[i];
+    arr[i] = arr[len - i - 1];
+    arr[len - i - 1] = tmp;
+  }
+  return;
+}
+
+static void pointillism(int *arr, int row, int col) {
+    // if i neighboring with j, pair[i][j] = 1
+    int pairs[NCCL_TOPO_MAX_NODES][NCCL_TOPO_MAX_NODES];
+
+    //initialize the pair
+    for(int i = 0; i < col; i++) {
+        for(int j = 0; j < col; j++) {
+            pairs[i][j] = 0;
+        }
+    }
+
+    for(int i = 0; i < row; i++) {
+        for(int j = 0; j < col - 1; j++) {
+            int pre = arr[i * col + j];
+            int next = arr[i * col + j + 1];
+
+            if(pairs[pre%col][next%col] == 0) {
+                pairs[pre%col][next%col] = 1;
+                continue;
+            }
+
+            for(int k = j + 2; k < col - 1; k++) {
+                int other = arr[i * col + k];
+                if(pairs[pre%col][other%col] == 0) {
+                    arr[i * col + k] = next;
+                    arr[i * col + j + 1] = other;
+                    pairs[pre%col][other%col] = 1;
+                    break;
+                }
+            }
+        }
+    }
+    return;
+}
+
+// is an element in an array?
+static int in_array(int n, int *arr, int len) {
+    for(int i = 0; i < len; i++) {
+        if(n == arr[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+* in each row, for an element, try best not to have
+* the same next neighbor
+*/
+void pointillism_ex(int *arr, int rows, int cols) {
+    /*
+    * if an elemment y is the next neighbor of element y,
+    * pairs[x][y] will be set to 1, otherwise 0
+    */
+
+    int pairs[NCCL_TOPO_MAX_NODES][NCCL_TOPO_MAX_NODES];
+    //in each backtrace step, which element was tried
+    int tried[NCCL_TOPO_MAX_NODES][NCCL_TOPO_MAX_NODES];
+    //in the current step, the elements were picked so far
+    int sofar[NCCL_TOPO_MAX_NODES];
+
+    //initialize the pairs, pairs[i][j] = 0
+    for(int i = 0; i < cols; i++) {
+        for(int j = 0; j < cols; j++) {
+            pairs[i][j] = 0;
+        }
+    }
+
+    // go through each row
+    for(int i = 0; i < rows; i++) {
+        int start = arr[i * cols];
+        int end = arr[i * cols + cols - 1];
+        for(int m = 0; m < cols; m++) {
+            for(int n = 0; n < cols; n++) {
+                tried[m][n] = 0;
+            }
+            tried[m][start % cols] = 1;
+            tried[m][end % cols] = 1;
+        }
+
+        // the start & end elements are not allowed to move
+        sofar[0] = start;
+        sofar[cols - 1] = end;
+
+        for(int l = 1; l < cols - 1; l++) {
+            sofar[l] = -1;
+        }
+
+        int steps = 1;
+        while(0 < steps && steps < cols) {
+            int pre = sofar[steps - 1];
+            int next = 0;
+            int success = 0;
+
+            for(int j = 0; j < cols; j++) {
+                next = arr[i * cols + j];
+
+                if(steps == cols -1 && pairs[pre % cols][next % cols] == 0) {
+                    success = 1;
+                    steps++;
+                    break;
+                }
+                else if(in_array(next, sofar, cols) == 0 &&
+                    pairs[pre % cols][next % cols] == 0 &&
+                        tried[steps][next % cols] == 0) {
+                    success = 1;
+                    tried[steps][next % cols] = 1;
+                    sofar[steps] = next;
+                    steps++;
+                    break;
+                }
+                tried[steps][next % cols] = 1;
+            }
+
+            // if succeed, go ahead
+            if(success == 1) {
+                continue;
+            }
+            else {
+                // if failed, go back one step
+                if(steps != cols -1) {
+                    for(int k = 0; k < cols; k++) {
+                        tried[steps][k] = 0;
+                    }
+                    tried[steps][start % cols] = 1;
+                    tried[steps][end % cols] = 1;
+                }
+                sofar[steps--] = -1;
+            }
+        }
+
+        // if backtrace failed, try best with a creedy algorithem
+        if(steps == 0) {
+            for(int m = 0; m < cols - 1; m++) {
+                int me = arr[i * cols + m];
+                for(int n = m + 1; n < cols - 1; n++) {
+                    int other = arr[i * cols + n];
+                    if(pairs[me % cols][other % cols] == 0) {
+                        arr[i * cols + n] = arr[i * cols + m + 1];
+                        arr[i * cols + m + 1] = other;
+                        break;
+                    }
+                }
+            }
+        }
+
+        //initialize the global pairs
+        for(int k = 0; k < cols - 1; k++) {
+            if(steps == cols) {
+                arr[i * cols + k + 1] = sofar[k + 1];
+            }
+            int me = arr[i * cols + k];
+            int neighbor = arr[i * cols + k + 1];
+            pairs[me % cols][neighbor % cols] = 1;
+        }
+    }
+}
+
 ncclResult_t ncclTopoPreset(struct ncclComm* comm, struct ncclTopoGraph** graphs, struct ncclTopoRanks* topoRanks) {
   int rank = comm->rank;
   int localRanks = comm->topo->nodes[GPU].count;
   int nChannels = comm->nChannels;
 
   topoRanks->nvlsHeadNum = 0;
+
+  // re-arrange the order of intra-node ranks
+  //int *ringIntra_all = graphs[NCCL_ALGO_RING]->intra;
+  //pointillism_ex(ringIntra_all, nChannels, localRanks);
+
   for (int c=0; c<nChannels; c++) {
     struct ncclChannel* channel = comm->channels+c;
     channel->ring.prev = channel->ring.next = -1;
@@ -63,6 +236,27 @@ ncclResult_t ncclTopoPreset(struct ncclComm* comm, struct ncclTopoGraph** graphs
         channel->collnetChain.up      = i == 0 ? comm->nRanks : collNetIntra[i-1];
         channel->collnetChain.down[0] = i == localRanks-1 ? -1 : collNetIntra[i+1];
       }
+    }
+// reverse ringIntra
+    if(localRanks >= 8) {
+      reverse_array(ringIntra, localRanks);
+    }
+    
+
+    // have the reverse recv, send, prev and next
+    for(int i = 0; i < localRanks; i++) {
+      if(ringIntra[i] == rank) {
+        topoRanks->ringReverseRecv[c] = ringIntra[0];
+        topoRanks->ringReverseSend[c] = ringIntra[localRanks - 1];
+        topoRanks->ringReversePrev[c] = (i == 0) ? -1 : ringIntra[i-1];
+        topoRanks->ringReverseNext[c] = (i == localRanks-1) ? -1 : ringIntra[i+1];
+	      break;
+      }
+    }
+
+    // reverse back
+    if(localRanks >= 8) {
+      reverse_array(ringIntra, localRanks);
     }
   }
   // Duplicate channels trees
@@ -389,6 +583,7 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
   NCCLCHECKGOTO(ncclCalloc(&treeToChild1, nNodes*MAXCHANNELS), ret, fail);
   NCCLCHECKGOTO(ncclCalloc(&nvlsHeads, nNodes*MAXCHANNELS), ret, fail);
 
+/*
   // Alternate rings to avoid crossing rails
   if (graphs[NCCL_ALGO_RING]->crossNic == 2 && (nChannels % 2) == 0) {
     for (int r=0; r<comm->nRanks; r++) {
@@ -403,19 +598,32 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
       }
     }
   }
-
+*/
   for (int c=0; c<nChannels;c++) {
     for (int n=0; n<nNodes; n++) {
       int r = firstRanks[n];
-      ringRecv[c*nNodes+n] = allTopoRanks[r]->ringRecv[c];
-      ringSend[c*nNodes+n] = allTopoRanks[r]->ringSend[c];
+      if(n % 2 == 0) {
+          ringRecv[c*nNodes+n] = allTopoRanks[r]->ringRecv[c];
+          ringSend[c*nNodes+n] = allTopoRanks[r]->ringSend[c];
+      }
+      else {
+        ringRecv[c*nNodes+n] = allTopoRanks[r]->ringReverseRecv[c];
+        ringSend[c*nNodes+n] = allTopoRanks[r]->ringReverseSend[c];
+      }
       treeToParent[c*nNodes+n] = allTopoRanks[r]->treeToParent[c];
       treeToChild0[c*nNodes+n] = allTopoRanks[r]->treeToChild0[c];
       treeToChild1[c*nNodes+n] = allTopoRanks[r]->treeToChild1[c];
     }
     for (int r=0; r<nranks; r++) {
-      ringPrev[c*nranks+r] = allTopoRanks[r]->ringPrev[c];
-      ringNext[c*nranks+r] = allTopoRanks[r]->ringNext[c];
+        int node = comm->rankToNode[r];
+        if(node % 2 == 0) {
+            ringPrev[c*nranks+r] = allTopoRanks[r]->ringPrev[c];
+            ringNext[c*nranks+r] = allTopoRanks[r]->ringNext[c];
+        }
+        else {
+            ringPrev[c*nranks+r] = allTopoRanks[r]->ringReversePrev[c];
+            ringNext[c*nranks+r] = allTopoRanks[r]->ringReverseNext[c];
+        }
     }
   }
 

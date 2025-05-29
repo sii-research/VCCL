@@ -1748,6 +1748,60 @@ static ncclResult_t topoGetAlgoInfo(
   if (simInfo) simInfo->estimatedTime = time;
   TRACE(NCCL_COLL, "%ld Bytes -> Algo %d proto %d time %f", nBytes, info->algorithm, info->protocol, time);
 
+  /**
+   * In specific heterogeneous environment, for example, 2 x H100 + 2 x H800 with different PICe structure,
+   * ReduceScatter & Allgather may hang because of different ALGO & PROTO are got on different nodes. 
+   * Therefore, if not AllRduce (no problem), will set ALGO to RING and set protocol to SIMPLE. 
+   *    
+ */
+
+  /*int SKIP_SETUP_NVLS = 0;
+  const char* SKIP_SETUP_NVLS_ENV = ncclGetEnv("BYPASS_NVLS");
+  if (SKIP_SETUP_NVLS_ENV != NULL && strcasecmp(SKIP_SETUP_NVLS_ENV, "1") == 0) SKIP_SETUP_NVLS = 1;
+
+
+  if(SKIP_SETUP_NVLS == 1 && collInfo->coll == ncclFuncAllReduce){
+      collInfo->algorithm = NCCL_ALGO_RING;
+      collInfo->protocol = NCCL_PROTO_SIMPLE;
+  }
+
+  if(collInfo->coll != ncclFuncAllReduce) {
+      collInfo->algorithm = NCCL_ALGO_RING;
+      collInfo->protocol = NCCL_PROTO_SIMPLE;
+  }*/
+/*
+  else {
+      collInfo->algorithm = NCCL_ALGO_TREE;
+      collInfo->protocol = NCCL_PROTO_SIMPLE;
+  }
+*/
+  /*
+   * if specify one protocol via environment variable
+   * will apply this protocol in rs and rg
+  */
+/*
+  int protoEnable[NCCL_NUM_PROTOCOLS] = { 0, 0, 0 };
+  const char *protoStr = ncclGetEnv("NCCL_PROTO");
+  if (protoStr) {
+    NCCLCHECK(parseList(protoStr, ncclProtoStr, NCCL_NUM_PROTOCOLS, protoEnable));
+  }
+
+  uint8_t env_p = collInfo->protocol;
+  int n = 0;
+
+  for(int i = 0; i < NCCL_NUM_PROTOCOLS; i++) {
+    if(protoEnable[i] == 1) {
+      env_p = i;
+      n++;
+    }
+  }
+
+  if((collInfo->coll == ncclFuncReduceScatter || collInfo->coll == ncclFuncAllGather) && n == 1) {
+      collInfo->protocol = env_p;
+      collInfo->algorithm = NCCL_ALGO_RING;
+  }
+*/
+
   int nc = comm->nChannels;
   int nt = comm->maxThreads[info->algorithm][info->protocol];
   int threadThreshold = comm->threadThresholds[info->algorithm][info->protocol];

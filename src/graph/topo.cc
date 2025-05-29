@@ -1474,6 +1474,62 @@ ncclResult_t ncclTopoGetLocalNet(struct ncclTopoSystem* system, int rank, int ch
   return ncclSuccess;
 }
 
+int cmpNetIndice(const void *n1, const void* n2) {
+  return *(int*)n1 - *(int*)n2;
+}
+
+ncclResult_t ncclTopoSmartGetNet(struct ncclTopoSystem* system, int rank, int channelId, int64_t* id, int64_t* backupId) {
+  int gpu;
+  NCCLCHECK(ncclTopoRankToIndex(system, rank, &gpu));
+  int localNets[NCCL_TOPO_MAX_NODES];
+  int localNetCount;
+  NCCLCHECK(ncclTopoGetLocal(system, GPU, gpu, NET, localNets, &localNetCount, NULL));
+  /*
+  * Under a single PCIe bridge, 2 GPUs may connect to 2 NICs or 4 ports. For example, GPU0 and GPU1
+  * connect to ports mlx_4, mlx_5, mlx_6 and mlx_7 tranversing at most a single PCIe bridge. In this case,
+  * a GPU should choose 2 ports in the same subnet by robin to make sure the traffic going out of 
+  * the 2 ports on everage.
+  */
+  int localGpuCount;
+  int localGpus[NCCL_TOPO_MAX_NODES];
+  if(localNetCount > 0) {
+    NCCLCHECK(ncclTopoGetLocal(system, NET, localNets[0], GPU, localGpus, &localGpuCount, NULL));
+  }
+  qsort(localNets, localNetCount, sizeof(int), cmpNetIndice);
+  int index = channelId % 2;
+  //2 GPUs and 2 dual-port RNICs under the same PCIe Bridge
+  if((localGpuCount == 1 || localGpuCount == 2) && localNetCount == 4) {
+    qsort(localNets, localNetCount, sizeof(int), cmpNetIndice);
+    if(gpu % 2 == 0) {
+      *id = system->nodes[NET].nodes[localNets[index]].id;
+      *backupId = system->nodes[NET].nodes[localNets[(index + 1)%2]].id;
+    }
+    else {
+      *id = system->nodes[NET].nodes[localNets[2 + (index)]].id;
+      *backupId = system->nodes[NET].nodes[localNets[2 + (index +1)%2]].id;
+    }
+  }
+  //2 GPUs and 1 dual-ports RNIC under the same PCIe Bridge
+  else if (localGpuCount == 1 && localNetCount == 2) {
+      index = channelId % localNetCount;
+      *id = system->nodes[NET].nodes[localNets[index]].id;
+      *backupId = system->nodes[NET].nodes[localNets[(index + 1) % 2]].id;
+  }
+  // 2 GPUs and 2 RNICs under the same PCIe Bridge
+  else if(localGpuCount == 2 && localNetCount == 2) {
+    // it's ugly, but we need to handle the case of 2 NICs (unique port) and 2 GPUs under one PCIe bridge
+    // suppose the 2 gpus are neighbor to each other
+    for(int n = 0; n < localNetCount; n++) {
+      if(gpu % localNetCount == n) {
+        *id = localNets[n];
+        *backupId = localNets[(n + 1) % localNetCount];
+      }
+    }
+  }
+
+  return ncclSuccess;
+}
+
 ncclResult_t ncclTopoGetLocalGpu(struct ncclTopoSystem* system, int64_t netId, int* gpuIndex) {
   ncclResult_t ret = ncclSuccess;
   int netIndex;

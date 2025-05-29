@@ -83,6 +83,7 @@ struct alignas(64) ncclIbDev {
 #define MAX_IB_VDEVS MAX_IB_DEVS*8
 struct ncclIbMergedDev ncclIbMergedDevs[MAX_IB_VDEVS];
 struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
+int ncclIbBackupDevs[MAX_IB_DEVS];
 pthread_mutex_t ncclIbLock = PTHREAD_MUTEX_INITIALIZER;
 static int ncclIbRelaxedOrderingEnabled = 0;
 

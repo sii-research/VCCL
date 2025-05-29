@@ -536,7 +536,7 @@ fail:
 }
 
 // Pre-process the string so that running "strings" on the lib can quickly reveal the version.
-#define VERSION_STRING "NCCL version " STR(NCCL_MAJOR) "." STR(NCCL_MINOR) "." STR(NCCL_PATCH) NCCL_SUFFIX "+cuda" STR(CUDA_MAJOR) "." STR(CUDA_MINOR)
+#define VERSION_STRING "VCCL version " STR(NCCL_MAJOR) "." STR(NCCL_MINOR) "." STR(NCCL_PATCH) NCCL_SUFFIX "+cuda" STR(CUDA_MAJOR) "." STR(CUDA_MINOR)
 static void showVersion() {
   if (ncclDebugLevel == NCCL_LOG_VERSION || ncclDebugLevel == NCCL_LOG_WARN) {
     VERSION("%s", VERSION_STRING);
@@ -1157,9 +1157,6 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
     }
     NCCLCHECKGOTO(ncclTransportRingConnect(comm), ret, fail);
 
-    // Connect Trees
-    NCCLCHECKGOTO(ncclTransportTreeConnect(comm), ret, fail);
-
     // Connect PAT only for communicators with 1 GPU per node
     if (comm->maxLocalRanks == 1) NCCLCHECKGOTO(ncclTransportPatConnect(comm), ret, fail);
 
@@ -1169,6 +1166,9 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
 
     // And NVLS trees if needed
     NCCLCHECKGOTO(ncclNvlsTreeConnect(comm), ret, fail);
+
+    // Connect Trees
+    NCCLCHECKGOTO(ncclTransportTreeConnect(comm), ret, fail);
 
     // Check if we can setup CollNet
     if (comm->collNetSupport > 0) {

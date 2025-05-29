@@ -607,6 +607,37 @@ ncclResult_t ncclTopoSearchRecNet(struct ncclTopoSystem* system, struct ncclTopo
     if ((graph->pattern == NCCL_TOPO_PATTERN_NVLS || graph->pattern == NCCL_TOPO_PATTERN_COLLNET_DIRECT) && graphFound) break;
     int n = nets[(graph->nChannels+i)%netCount];
     struct ncclTopoNode* net = system->nodes[NET].nodes+n;
+
+    /*
+    * In case of NVLSTree, because the maximum number of graph->nChannels is 8 according to maximum 8 (NCCL_MAX_NVLS_ARITY) heads,
+    * the gpu in the topo graph channels should not be duplicate. Otherwise, for example, if dual-port NICs are installed on the 
+    * GPU servers, the graph cannot cover all gpus.
+    */
+    if(graph->pattern == NCCL_TOPO_PATTERN_NVLS) {
+      int ngpus = system->nodes[GPU].count;
+      qsort(nets, netCount, sizeof(int), cmpNetIndice);
+      for(int j = 0; j < netCount; j++) {
+        n = nets[j];
+        net = system->nodes[NET].nodes+n;
+        int gpu;
+        NCCLCHECK(ncclTopoGetLocalGpu(system, net->id, &gpu));
+        if(gpu == -1) {
+          continue;
+        }
+        int c = 0;
+        for(c = 0; c < graph->nChannels; c++) {
+          int gpu1;
+	  NCCLCHECK(getGpuIndex(system, graph->intra[c * ngpus], &gpu1));
+          if(gpu1 == gpu) {  
+	    break;
+          }
+        }
+        if(c == graph->nChannels) {
+          break;
+        }
+      }
+    }
+
     if (graph->collNet && net->net.collSupport == 0) continue;
     if (net->net.bw < bw) continue;
     if (graph->pattern == NCCL_TOPO_PATTERN_RING && graph->crossNic == 2
@@ -1206,8 +1237,9 @@ fail:
 // 0: don't use PXN for P2P, 1: use PXN if needed, 2: use PXN as much as possible to maximize aggregation
 NCCL_PARAM(P2pPxnLevel, "P2P_PXN_LEVEL", 2);
 
-ncclResult_t ncclTopoGetNetDev(struct ncclComm* comm, int rank, struct ncclTopoGraph* graph, int channelId, int peerRank, int64_t* id, int* dev, int* proxyRank) {
+ncclResult_t ncclTopoGetNetDev(struct ncclComm* comm, int rank, struct ncclTopoGraph* graph, int channelId, int peerRank, int64_t* id, int* dev,  int64_t* backupId, int *backupDev, int* proxyRank) {
   int64_t netId = -1;
+  int64_t backupNetId = -1;
   int netDev = -1;
   if (graph) {
     // Honor the net device in the graph
@@ -1219,9 +1251,15 @@ ncclResult_t ncclTopoGetNetDev(struct ncclComm* comm, int rank, struct ncclTopoG
     } else {
       NCCLCHECK(getNvlsNetDev(comm, graph, channelId, &netId));
     }
+
+    NCCLCHECK(ncclTopoSmartGetNet(comm->topo, rank, channelId, &netId, &backupNetId));
     NCCLCHECK(ncclTopoIdToNetDev(comm->topo, netId, &netDev));
+
     if (dev) *dev = netDev;
+    if(backupDev) *backupDev = netDev;
     if (id) *id = netId;
+    if(backupId) *backupId = netId;
+    
     NCCLCHECK(ncclTopoGetIntermediateRank(comm->topo, rank, netId, proxyRank));
   } else if (peerRank == -1) {
     return ncclInternalError;
