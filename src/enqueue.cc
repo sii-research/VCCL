@@ -751,7 +751,8 @@ static ncclResult_t addP2pToPlan(
     int nChannelsMin, int nChannelsMax, int p2pRound,
     int sendRank, void* sendAddr, ssize_t sendBytes,
     int recvRank, void* recvAddr, ssize_t recvBytes,
-    struct ncclTaskP2p** p2pTasks
+    struct ncclTaskP2p** p2pTasks,
+    unsigned long long sendFuncTimes, uint64_t sendGroupHash, unsigned long long recvFuncTimes, uint64_t recvGroupHash
   ) {
   constexpr int connIndex = 1;
   bool selfSend = (sendRank == comm->rank);
@@ -960,6 +961,10 @@ static ncclResult_t addP2pToPlan(
         // equal one plus the batch index this p2p settled in.
         proxyOps[dir].channelId = channelId;
         proxyOps[dir].opCount = uint64_t(comm->planner.wipPlan.channels[channelId].nWorkBatchesP2p)<<1 | 1;
+
+        // add info that is used by telemetry
+        proxyOps[dir].ncclFuncTimes = dir ? sendFuncTimes : recvFuncTimes;
+        proxyOps[dir].groupHash = dir ? sendGroupHash : recvGroupHash;
         NCCLCHECK(addProxyOpIfNeeded(comm, plan, &proxyOps[dir]));
         NCCLCHECK(addProfilerProxyOpIfNeeded(comm, plan, &proxyOps[dir]));
       }
@@ -1034,7 +1039,11 @@ static ncclResult_t scheduleP2pTasksToPlan(
           return ncclSuccess;
         }
         struct ncclTaskP2p* p2pTasks[2] = { recv, send };
-        NCCLCHECK(addP2pToPlan(comm, plan, nChannelsMin, nChannelsMax, round, sendRank, sendBuff, sendBytes, recvRank, recvBuff, recvBytes, p2pTasks));
+        unsigned long long sendNcclFuncTimes = send ? send->ncclFuncTimes : 0;
+        unsigned long long recvNcclFuncTimes = recv ? recv->ncclFuncTimes : 0;
+        uint64_t sendGroupHash = send ? send->groupHash : 0;
+        uint64_t recvGroupHash = recv ? recv->groupHash : 0;
+        NCCLCHECK(addP2pToPlan(comm, plan, nChannelsMin, nChannelsMax, round, sendRank, sendBuff, sendBytes, recvRank, recvBuff, recvBytes, p2pTasks,sendNcclFuncTimes, sendGroupHash, recvNcclFuncTimes, recvGroupHash));
         if (send != nullptr) {
           ncclIntruQueueDequeue(&peers[sendRank].sendQueue);
           ncclIntruQueueEnqueue(&plan->p2pTaskQueue, send);
@@ -2041,6 +2050,8 @@ static ncclResult_t calcCollChunking(
   proxyOp->protocol = info->protocol;
   proxyOp->dtype = info->datatype;
   proxyOp->algorithm = info->algorithm;
+  proxyOp->groupHash = comm->groupHash;
+  proxyOp->ncclFuncTimes = comm->ncclFuncTimes;
   if (info->opDev.op == ncclDevPreMulSum || info->opDev.op == ncclDevSumPostDiv) {
     proxyOp->redOp = ncclSum; // Network sees avg as sum
   } else {
@@ -2342,10 +2353,15 @@ static ncclResult_t taskAppend(struct ncclComm* comm, struct ncclInfo* info) {
   return ncclSuccess;
 }
 
+extern ncclResult_t ncclIbCheckConnector(ncclConnector *conn, bool &if_fill);
+extern ncclResult_t ncclIbRefreshState(void *transportResources, bool if_send, bool ifsendrecv);
+ncclResult_t ncclIbCheckIfNeedSync(void* transportResources, bool if_send, bool& needStreamSync);
+
 ncclResult_t ncclEnqueueCheck(struct ncclInfo* info) {
   NCCLCHECK(ncclGroupStartInternal());
   ncclResult_t ret = ncclSuccess;
   int devOld = -1;
+  bool ifCudaSync = false;
 
   NCCLCHECKGOTO(CommCheck(info->comm, info->opName, "comm"), ret, fail);
   // Check whether communicator is ready to communicate
@@ -2361,6 +2377,47 @@ ncclResult_t ncclEnqueueCheck(struct ncclInfo* info) {
         info->opName, info->comm->opCount, info->sendbuff, info->recvbuff, info->count,
         info->datatype, info->op, info->root, info->comm, info->comm->nRanks, info->stream);
   TRACE_CALL("nccl%s(%" PRIx64 ",%" PRIx64 ",%zu,%d,%d,%d,%p,%p)", info->opName, reinterpret_cast<int64_t>(info->sendbuff), reinterpret_cast<int64_t>(info->recvbuff), info->count, info->datatype, info->op, info->root, info->comm, info->stream);
+
+  // set the comm dev type to original dev instead of backup dev
+  for (int i = 1; i < info->comm->nRanks && i <= 128; i++) {
+    int recvPeer = (info->comm->rank - i + info->comm->nRanks) % info->comm->nRanks;
+
+    for (int c = 0; c < MAXCHANNELS; c++) {
+      // in the receiver, try to transition to normal qp. In sender, use the message in ncclIbPostFifo to choose the qp.
+      for (int connIndex = 0; connIndex < NCCL_MAX_CONNS; connIndex++) {
+        // if nccl api is send, break
+        if (connIndex == 0 && info->coll == ncclFuncSend) break;
+
+        if (info->comm->channels[c].peers == NULL ||
+            info->comm->channels[c].peers[recvPeer] == NULL) {
+          continue;
+        }
+        struct ncclConnector *conn = info->comm->channels[c].peers[recvPeer]->recv + connIndex;
+        if (conn != NULL &&
+            (conn->noUsePxnTransport) &&
+            (conn->connected)) {
+          bool if_fill = false;
+          NCCLCHECK(ncclIbCheckConnector(conn, if_fill));
+          if (if_fill) {
+            bool needCudaSync = false;
+            if (!ifCudaSync) {
+              NCCLCHECK(ncclIbCheckIfNeedSync(conn->proxyConn.connection->transportResources, false, needCudaSync));
+              if (needCudaSync) {
+                CUDACHECK(cudaStreamSynchronize(info->stream));
+                ifCudaSync = true;
+              }
+            }
+            if (info->coll == ncclFuncRecv) {
+              NCCLCHECK(ncclIbRefreshState(conn->proxyConn.connection->transportResources, false, true));
+            }
+            else {
+              NCCLCHECK(ncclIbRefreshState(conn->proxyConn.connection->transportResources, false, false));
+            }
+          }
+        }
+      }
+    }
+  }
 
   NCCLCHECKGOTO(taskAppend(info->comm, info), ret, fail);
 

@@ -227,6 +227,8 @@ struct ncclTaskP2p {
   ncclDataType_t datatype;
   int root;
   size_t bytes;
+  unsigned long long ncclFuncTimes;
+  uint64_t groupHash;
 
   // Profiler plugin
   int eActivationMask;
@@ -616,6 +618,8 @@ struct ncclComm {
   bool useNetPXN;
   bool useGdr;
   int splitCount;
+  uint64_t groupHash;
+  unsigned long long ncclFuncTimes = 0;
   uint64_t endMagic;
 };
 

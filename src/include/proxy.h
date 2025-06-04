@@ -103,6 +103,9 @@ struct ncclProxyOp {
   uint64_t workCounter;
 
   struct ncclProxyOp *enqNext;
+  unsigned long long ncclFuncTimes;
+  int peerRank;
+  uint64_t groupHash;
 };
 
 struct ncclProxySubArgs {
@@ -149,6 +152,10 @@ struct ncclProxySubArgs {
 
   void* recvRequestsCache[NCCL_STEPS];
   int recvRequestsSubCount;
+
+  // use for backup rollback
+  bool needRollback;
+  bool hasRollback;
 };
 
 struct ncclProxyArgs {
@@ -183,6 +190,10 @@ struct ncclProxyArgs {
   struct ncclProxyArgs** proxyAppendPtr;
 
   union ncclProxyOpSpecifics specifics;
+  unsigned long long ncclFuncTimes;
+  int peerRank;
+  int rank;
+  uint64_t groupHash;
 };
 #define NCCL_MAX_NETDEVS 128
 

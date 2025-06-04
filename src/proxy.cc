@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sched.h>
+#include "timer_log.h"
 
 #define NCCL_MAX_PROXY_CONNECTIONS (NCCL_MAX_LOCAL_RANKS+1)
 
@@ -376,6 +377,8 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   sub->recvMhandle = op->recvMhandle;
   sub->sendbuff = op->sendbuff;
   sub->recvbuff = op->recvbuff;
+  sub->needRollback = false;
+  sub->hasRollback = false;
   sub->eActivationMask = op->eActivationMask;
   sub->taskEventHandle = op->taskEventHandle;
   sub->rank = op->rank;
@@ -416,6 +419,10 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   args->state = ncclProxyOpReady;
   args->progress = op->connection->tcomm->proxyProgress;
   args->proxyAppendPtr = op->connection->proxyAppendPtr;
+  args->ncclFuncTimes = op->ncclFuncTimes;
+  args->peerRank = op->peerRank;
+  args->groupHash = op->groupHash;
+  args->rank = op->rank;
   return ncclSuccess;
 }
 
@@ -553,6 +560,8 @@ static ncclResult_t SaveProxyProfiler(struct ncclComm* comm, struct ncclProxyOp*
 
 static ncclResult_t SaveProxy(struct ncclComm* comm, struct ncclChannel* channel, int type, int peer, struct ncclProxyOp* op, int connIndex, bool* justInquire) {
   if (peer < 0) return ncclSuccess;
+  op->peerRank = peer;
+  op->rank = comm->rank;
 
   struct ncclChannelPeer* peerComm = channel->peers[peer];
   struct ncclConnector* connector = type == proxyRecv ? peerComm->recv+connIndex : peerComm->send+connIndex;
@@ -1832,6 +1841,10 @@ ncclResult_t ncclProxyCreate(struct ncclComm* comm) {
     proxyState->directMode = comm->directMode;
     memcpy(proxyState->buffSizes, comm->buffSizes, sizeof(comm->buffSizes));
 
+    if(TIMER_LOG_ENTRY){
+      global_timer_log.init();
+    }
+
     PTHREADCHECK(pthread_create(&comm->proxyState->thread, NULL, ncclProxyService, comm->proxyState), "pthread_create");
     ncclSetThreadName(comm->proxyState->thread, "NCCL Service %2d", comm->cudaDev);
 
@@ -1888,6 +1901,9 @@ ncclResult_t ncclProxyStop(struct ncclComm* comm) {
 }
 
 ncclResult_t ncclProxyDestroy(struct ncclComm* comm) {
+  if(TIMER_LOG_ENTRY){
+    global_timer_log.destroy();
+  }
   struct ncclProxyState* sharedProxyState = comm->sharedRes->proxyState;
 
   if (sharedProxyState) {

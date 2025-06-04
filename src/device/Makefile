@@ -56,7 +56,7 @@ $(OBJDIR)/gensrc: generate.py
 	  (bar='!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'; \
 	   printf "\n$${bar}\nERROR: Building NCCL requires a Python 3 installation invokable as 'python3'.\n$${bar}\n\n" 1>&2; \
 	   exit 1)) \
-	&& ./generate.py $@ "$(ONLY_FUNCS)"
+	&& python3 ./generate.py $@ "$(ONLY_FUNCS)"
 else
 # Case if the <gensrc> directory is pre-generated and checked in the repo as ./gen:
 $(OBJDIR)/gensrc:

@@ -25,6 +25,29 @@ static void msleep(unsigned int time_msec) {
   nanosleep(&tv, NULL);
 }
 
+extern char global_hostname[1024];
+
+
+ncclResult_t get_ip_address(struct sockaddr *sa, char *ip) {
+
+    switch(sa->sa_family) {
+        case AF_INET: { // IPv4
+            struct sockaddr_in *sa_in = (struct sockaddr_in *)sa;
+            inet_ntop(AF_INET, &(sa_in->sin_addr), ip, INET6_ADDRSTRLEN);
+            break;
+        }
+        case AF_INET6: { // IPv6
+            struct sockaddr_in6 *sa_in6 = (struct sockaddr_in6 *)sa;
+            inet_ntop(AF_INET6, &(sa_in6->sin6_addr), ip, INET6_ADDRSTRLEN);
+            break;
+        }
+        default:
+        ;
+            // printf("Unknown AF\n");
+    }
+    return ncclSuccess;
+}
+
 static ncclResult_t socketProgressOpt(int op, struct ncclSocket* sock, void* ptr, int size, int* offset, int block, int* closed) {
   int bytes = 0;
   *closed = 0;
@@ -43,8 +66,10 @@ static ncclResult_t socketProgressOpt(int op, struct ncclSocket* sock, void* ptr
         return ncclSuccess;
       }
       if (errno != EINTR && errno != EWOULDBLOCK && errno != EAGAIN) {
-        WARN("socketProgressOpt: Call to %s %s failed : %s", (op == NCCL_SOCKET_RECV ? "recv from" : "send to"),
-             ncclSocketToString(&sock->addr, line), strerror(errno));
+        char ip[INET6_ADDRSTRLEN];
+        get_ip_address(&sock->addr.sa, ip);
+        WARN("socketProgressOpt: %s Call to %s %s failed : %s remote ip %s", (op == NCCL_SOCKET_RECV ? "recv from" : "send to"),
+             global_hostname, ncclSocketToString(&sock->addr, line), strerror(errno), ip);
         return ncclRemoteError;
       } else {
         bytes = 0;
@@ -68,7 +93,9 @@ static ncclResult_t socketProgress(int op, struct ncclSocket* sock, void* ptr, i
       return ncclSuccess;
     } else {
       char line[SOCKET_NAME_MAXLEN+1];
-      WARN("socketProgress: Connection closed by remote peer %s", ncclSocketToString(&sock->addr, line, 0));
+      char ip[INET6_ADDRSTRLEN];
+      get_ip_address(&sock->addr.sa, ip);
+      WARN("socketProgress: %s Connection closed by remote peer %s remote ip %s", global_hostname, ncclSocketToString(&sock->addr, line, 0), ip);
       return ncclRemoteError;
     }
   }
@@ -553,7 +580,9 @@ static ncclResult_t socketConnectCheck(struct ncclSocket* sock, int errCode, con
   } else {
     char line[SOCKET_NAME_MAXLEN+1];
     sock->state = ncclSocketStateError;
-    WARN("%s: Connect to %s failed : %s", funcName, ncclSocketToString(&sock->addr, line), strerror(errCode));
+    char ip[INET6_ADDRSTRLEN];
+    get_ip_address(&sock->addr.sa, ip);
+    WARN("%s: %s Connect to %s failed : %s remote ip %s", global_hostname, funcName, ncclSocketToString(&sock->addr, line), strerror(errCode), ip);
     return ncclSystemError;
   }
   return ncclSuccess;
