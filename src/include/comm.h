@@ -619,7 +619,7 @@ struct ncclComm {
   bool useGdr;
   int splitCount;
   uint64_t groupHash;
-  unsigned long long ncclFuncTimes = 0;
+  unsigned long long ncclFuncTimes;
   uint64_t endMagic;
 };
 
