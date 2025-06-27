@@ -28,6 +28,8 @@ extern struct ncclTransport shmTransport;
 extern struct ncclTransport netTransport;
 extern struct ncclTransport collNetTransport;
 extern struct ncclTransport profilerTransport;
+extern struct ncclTransport psmP2pTransport;
+extern struct ncclTransport psmNetTransport;
 
 extern struct ncclTransport* ncclTransports[];
 // Forward declarations
