@@ -159,8 +159,15 @@ static ncclResult_t canConnect(int* ret, struct ncclComm* comm, struct ncclTopoG
   return ncclSuccess;
 }
 
-NCCL_PARAM(NetSharedBuffers, "NET_SHARED_BUFFERS", -2);
-NCCL_PARAM(NetSharedComms, "NET_SHARED_COMMS", 1);
+// NCCL_PARAM(NetSharedBuffers, "NET_SHARED_BUFFERS", -2);
+// NCCL_PARAM(NetSharedComms, "NET_SHARED_COMMS", 1);
+
+// use origin func to make sure compile success
+extern int64_t ncclParamNetSharedBuffers();
+extern int64_t ncclParamNetSharedComms();
+extern int64_t ncclParamNetOptionalRecvCompletion();
+extern int64_t ncclParamGdrCopySyncEnable();
+extern int64_t ncclParamGdrCopyFlushEnable();
 
 struct setupReq {
   int tpRank;
@@ -174,7 +181,7 @@ struct setupReq {
   int connIndex;
 };
 
-NCCL_PARAM(NetOptionalRecvCompletion, "NET_OPTIONAL_RECV_COMPLETION", 1);
+// NCCL_PARAM(NetOptionalRecvCompletion, "NET_OPTIONAL_RECV_COMPLETION", 1);
 
 static_assert(sizeof(ncclNetHandle_t) + sizeof(int) <= CONNECT_SIZE, "Not large enough ncclConnect to hold ncclNetHandle_t and useGdr flag");
 // Forward declaration
@@ -229,9 +236,9 @@ static ncclResult_t sendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
 }
 
 // GDRCOPY support: TAIL_ENABLE When enabled locates the RX proxy tail in CUDA memory
-NCCL_PARAM(GdrCopySyncEnable, "GDRCOPY_SYNC_ENABLE", 1);
+// NCCL_PARAM(GdrCopySyncEnable, "GDRCOPY_SYNC_ENABLE", 1);
 // GDRCOPY support: FLUSH_ENABLE When enabled uses a PCI-E read to flush GDRDMA buffers
-NCCL_PARAM(GdrCopyFlushEnable, "GDRCOPY_FLUSH_ENABLE", 0);
+// NCCL_PARAM(GdrCopyFlushEnable, "GDRCOPY_FLUSH_ENABLE", 0);
 
 /* Setup recv connector */
 static ncclResult_t recvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph, struct ncclPeerInfo* myInfo, struct ncclPeerInfo* peerInfo, struct ncclConnect* connectInfo, struct ncclConnector* recv, int channelId, int connIndex) {
@@ -1518,7 +1525,8 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
   return ncclSuccess;
 }
 
-ncclResult_t ncclNetDeregBuffer(struct ncclComm* comm, struct ncclProxyConnector* proxyConn, void* handle) {
+// ncclResult_t ncclNetDeregBuffer(struct ncclComm* comm, struct ncclProxyConnector* proxyConn, void* handle) {
+static ncclResult_t psmNetDeregBuffer(struct ncclComm* comm, struct ncclProxyConnector* proxyConn, void* handle) {
   NCCLCHECK(ncclProxyCallBlocking(comm, proxyConn, ncclProxyMsgDeregister, &handle, sizeof(void*), NULL, 0));
   INFO(NCCL_REG, "rank %d - deregistered net buffer handle %p", comm->rank, handle);
   return ncclSuccess;
@@ -1584,7 +1592,8 @@ fail:
   goto exit;
 }
 
-ncclResult_t ncclNetLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle) {
+// ncclResult_t ncclNetLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle) {
+static ncclResult_t psmNetLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle) {
   ncclResult_t ret = ncclSuccess;
   struct ncclReg *regRecord = NULL;
   bool isValid = false;
@@ -1617,7 +1626,8 @@ static ncclResult_t cleanupNet(struct ncclComm* comm, struct ncclCommCallback* c
   return ncclSuccess;
 }
 
-ncclResult_t ncclNetGraphRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle, struct ncclIntruQueue<struct ncclCommCallback, &ncclCommCallback::next>* cleanupQueue, int* nCleanupQueueElts) {
+// ncclResult_t ncclNetGraphRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle, struct ncclIntruQueue<struct ncclCommCallback, &ncclCommCallback::next>* cleanupQueue, int* nCleanupQueueElts) {
+static ncclResult_t psmNetGraphRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle, struct ncclIntruQueue<struct ncclCommCallback, &ncclCommCallback::next>* cleanupQueue, int* nCleanupQueueElts) {
   ncclResult_t ret = ncclSuccess;
   struct ncclNetCleanupCallback *record = NULL;
   struct ncclReg *regRecord = NULL;
@@ -1737,7 +1747,7 @@ static ncclResult_t recvProxyDeregBuffer(struct ncclProxyConnection* connection,
   return ncclSuccess;
 }
 
-struct ncclTransport netTransport = {
+struct ncclTransport psmNetTransport = {
   "NET",
   canConnect,
   { sendSetup, sendConnect, sendFree, proxySharedInit, sendProxySetup, sendProxyConnect, sendProxyFree, sendProxyProgress, sendProxyRegBuffer, sendProxyDeregBuffer },
