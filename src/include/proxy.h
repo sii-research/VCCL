@@ -16,6 +16,7 @@
 #include "shmutils.h"
 #include "p2p.h"
 #include "collectives.h"
+#include <atomic>
 
 typedef enum : uint8_t {
   ncclPatternRing,
@@ -101,6 +102,13 @@ struct ncclProxyOp {
   pid_t pid;
   void* profilerContext;
   uint64_t workCounter;
+
+  // Data fields for Pass SM NcclTransport type.
+  // ReadyEvent field is queried by proxy progress thread to check if the data is ready to be sent/recv.
+  // DoneCounter is used to track the number of completed proxyOps.
+  // The lifetime of this counter is beyond the lifetime of the proxyOp.
+  cudaEvent_t readyEvent;
+  std::atomic<int>* doneCounter;
 
   struct ncclProxyOp *enqNext;
 };
