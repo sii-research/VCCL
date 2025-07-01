@@ -19,6 +19,8 @@
 #define TRANSPORT_NET 2
 #define TRANSPORT_COLLNET 3
 #define TRANSPORT_PROFILER 4
+#define TRANSPORT_PSM_P2P 5
+#define TRANSPORT_PSM_NET 6
 
 #include "proxy.h"
 #include "comm.h"

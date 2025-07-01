@@ -11,14 +11,16 @@
 #include "timer.h"
 #include "transport.h"
 
+NCCL_PARAM(PassSm, "PASS_SM", 0); 
+
 struct ncclTransport* ncclTransports[NTRANSPORTS+3] = {
   &p2pTransport,
-  &psmP2pTransport,
   &shmTransport,
-  &psmNetTransport,
   &netTransport,
   &collNetTransport,
   &profilerTransport // Not really used for transport, only to create proxy ops polling on profiler counters.
+  &psmP2pTransport,
+  &psmNetTransport,
 };
 
 template <int type>
@@ -27,7 +29,15 @@ static ncclResult_t selectTransport(struct ncclComm* comm, struct ncclTopoGraph*
   struct ncclPeerInfo* peerInfo = comm->peerInfo+peer;
   struct ncclConnector* connector = (type == 1) ? comm->channels[channelId].peers[peer]->send + connIndex :
                                                   comm->channels[channelId].peers[peer]->recv + connIndex;
-  for (int t=0; t<NTRANSPORTS; t++) {
+  static const int defaultIndex[] = {0, 1, 2, 3};
+  static const int smfreeIndex[]  = {5, 6, 2, 3};
+
+  const int* indexArray = (ncclParamPassSm() == 1 && connIndex == 1)
+                          ? smfreeIndex
+                          : defaultIndex;
+  
+  for (int i=0; i<NTRANSPORTS; i++) {
+    int t = indexArray[i];
     struct ncclTransport *transport = ncclTransports[t];
     struct ncclTransportComm* transportComm = type == 1 ? &transport->send : &transport->recv;
     int ret = 0;

@@ -19,6 +19,7 @@
 #include <cassert>
 
 NCCL_PARAM(L1SharedMemoryCarveout, "L1_SHARED_MEMORY_CARVEOUT", 0);
+NCCL_PARAM(PassSm, "PASS_SM", 0); 
 
 // Returns maximum kernel stack size of all CUDA kernels
 ncclResult_t ncclInitKernelsForDevice(int cudaArch, int maxSharedMem, size_t* maxStackSize) {
@@ -772,7 +773,12 @@ static ncclResult_t addP2pToPlan(
         struct ncclConnector* conn = dir ? &channelPeers[peerRank]->send[connIndex]
                                          : &channelPeers[peerRank]->recv[connIndex];
         protoLL[dir] &= conn->conn.buffs[NCCL_PROTO_LL] != nullptr;
-        network[dir] |= conn->transportComm == (dir ? &netTransport.send : &netTransport.recv);
+        if (ncclParamPassSm()) {
+          network[dir] |= conn->transportComm == (dir ? &psmNetTransport.recv : &psmNetTransport.send);
+        } else {
+          network[dir] |= conn->transportComm == (dir ? &netTransport.send : &netTransport.recv);
+        }
+        
         proxySameProcess[dir] &= conn->proxyConn.sameProcess;
       }
     }
