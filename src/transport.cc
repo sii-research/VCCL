@@ -18,9 +18,9 @@ struct ncclTransport* ncclTransports[NTRANSPORTS+3] = {
   &shmTransport,
   &netTransport,
   &collNetTransport,
-  &profilerTransport // Not really used for transport, only to create proxy ops polling on profiler counters.
+  &profilerTransport, // Not really used for transport, only to create proxy ops polling on profiler counters.
   &psmP2pTransport,
-  &psmNetTransport,
+  &psmNetTransport
 };
 
 template <int type>

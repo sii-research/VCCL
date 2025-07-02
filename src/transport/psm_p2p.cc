@@ -101,13 +101,8 @@ extern int64_t ncclParamLegacyCudaRegister();
 extern int64_t ncclParamP2pReadEnable();
 extern int64_t ncclParamP2pDirectDisable();
 extern int64_t ncclParamP2pUseCudaMemcpy();
+extern int64_t ncclParamPassSm();
 
-static NCCL_PARAM(PsmPassSmEnv, "PSM_PASS_SM", 0);
-static NCCL_PARAM(PsmPxnDisableEnv, "PSM_PXN_DISABLE", 0);
-
-int64_t ncclParamPassSm(){
-  return ncclParamPsmPassSmEnv() && ncclParamPsmPxnDisableEnv();
-}
 
 /* Convert a PCI busId string into a local cudaDev device index (cf. CUDA_VISIBLE_DEVICES) */
 static int busIdToCudaDev(int64_t busId) {

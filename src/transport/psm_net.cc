@@ -168,6 +168,7 @@ extern int64_t ncclParamNetSharedComms();
 extern int64_t ncclParamNetOptionalRecvCompletion();
 extern int64_t ncclParamGdrCopySyncEnable();
 extern int64_t ncclParamGdrCopyFlushEnable();
+extern int64_t ncclParamPassSm();
 
 struct setupReq {
   int tpRank;
