@@ -19,8 +19,6 @@
 #include <cassert>
 
 NCCL_PARAM(L1SharedMemoryCarveout, "L1_SHARED_MEMORY_CARVEOUT", 0);
-NCCL_PARAM(PassSm, "PASS_SM", 0); 
-
 extern int64_t ncclParamPassSm();
 
 // Returns maximum kernel stack size of all CUDA kernels
