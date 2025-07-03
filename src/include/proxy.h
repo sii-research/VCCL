@@ -189,6 +189,8 @@ struct ncclProxyArgs {
   struct ncclProxyArgs* next;
   struct ncclProxyArgs* nextPeer;
   struct ncclProxyArgs** proxyAppendPtr;
+  cudaEvent_t readyEvent;
+  std::atomic<int>* doneCounter;
 
   union ncclProxyOpSpecifics specifics;
 };
