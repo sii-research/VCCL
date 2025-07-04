@@ -17,6 +17,7 @@
 #include "register.h"
 #include "graph.h"
 #include "profiler.h"
+#include <atomic>
 
 #if CUDART_VERSION < 9000
 struct cudaLaunchParams {
@@ -265,6 +266,13 @@ struct ncclKernelPlan {
 
   // Profiler plugin
   void* groupEventHandle;
+
+  // Used for Pass SM only.
+  // The total number of proxyOp's that have been enqueued in this plan.
+  std::atomic<int>* proxyOpCount;
+  // Event that proxy thread queries for starting progresssing.
+  cudaEvent_t proxyReadyEvent;
+  bool proxyReadyEventSet; // true if the proxyReadyEvent has been set
 };
 
 ////////////////////////////////////////////////////////////////////////////////

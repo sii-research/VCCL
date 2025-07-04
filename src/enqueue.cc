@@ -155,6 +155,24 @@ static void addWorkBatchToPlan(
   }
 }
 
+// helper function to show the proxy op information
+static void showProxyOp(struct ncclProxyOp* op) {
+  printf("[%ld| %s", op->opCount, op->pattern == ncclPatternSend ? "Send" : op->pattern == ncclPatternRecv ? "Recv" : "Coll");
+  printf("]");
+}
+
+// helper function to print out proxy op information of a plan
+static void printPlanProxyOp(struct ncclComm* comm, struct ncclKernelPlan* plan) {
+  printf("Plan for %d/%d ranks: %d work batches, %zu bytes of work, %zu bytes of args, channel mask 0x%" PRIx64 ,
+         comm->rank, comm->nRanks, plan->nWorkBatches, plan->workBytes, plan->kernelArgsSize, plan->channelMask);
+  struct ncclProxyOp* op = ncclIntruQueueHead(&plan->proxyOpQueue);
+  while (op != nullptr) {
+    showProxyOp(op);
+    op = op->enqNext;
+  }
+  printf("\n");
+}
+
 static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   ncclKernelPlanner::WipPlan::Channel* wipChannels = comm->planner.wipPlan.channels;
   size_t workBytes = plan->workBytes;
@@ -212,6 +230,7 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
     if (op) channelUbound = c+1;
   }
   // Phase 2: Dequeue from planner->channels[c], enqueue in merged order to plan
+  uint32_t proxyOpCnt = 0;
   while (nHeads != 0) {
     int c = -1;
     uint64_t minId = uint64_t(-1);
@@ -227,7 +246,18 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
     headIds[c] = opNext ? opNext->opCount : uint64_t(-1);
     nHeads -= opNext ? 0 : 1;
     ncclIntruQueueEnqueue(&plan->proxyOpQueue, op);
+    proxyOpCnt += 1;
   }
+  // TODO: where to recycle the field.
+  // All the modifications to plan are splitted into two parts:
+  // 1. the first part is to prepare Event, which is done in preparePlanForPSM.
+  // 2. the second part is to prepare proxyOpCount, which is done here.
+  // Better to keep the two parts together.
+  if (ncclParamPassSm()) {
+    plan->proxyOpCount = new std::atomic<int>(proxyOpCnt);
+  }
+
+  printPlanProxyOp(comm, plan);
 }
 
 NCCL_PARAM(GraphRegister, "GRAPH_REGISTER", 1);
@@ -1228,6 +1258,12 @@ static ncclResult_t uploadWork(struct ncclComm* comm, struct ncclKernelPlan* pla
   return ncclSuccess;
 }
 
+// Add PSM related information to the proxy op.
+static void AddPSMToProxyOp(struct ncclKernelPlan* plan, struct ncclProxyOp* op) {
+  op->readyEvent = plan->proxyReadyEvent;
+  op->doneCounter = plan->proxyOpCount;
+}
+
 static ncclResult_t uploadProxyOps(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   uint64_t collOpCount = comm->sharedRes->collOpCount;
   uint64_t p2pOpBump[MAXCHANNELS] = {/*0...*/};
@@ -1241,6 +1277,10 @@ static ncclResult_t uploadProxyOps(struct ncclComm* comm, struct ncclKernelPlan*
     op->eActivationMask = op->coll <= ncclFuncAllReduce ? op->task.coll->eActivationMask : op->task.p2p->eActivationMask;
     op->taskEventHandle = op->coll <= ncclFuncAllReduce ? op->task.coll->eventHandle : op->task.p2p->eventHandle;
     ncclProfilerAddPidToProxyOp(op);
+
+    if (ncclParamPassSm()) {
+      AddPSMToProxyOp(plan, op);
+    }
 
     uint64_t oldId = op->opCount;
     // Ignoring the bottom tag bit, opCount's are zero-based within plan so
@@ -1266,7 +1306,23 @@ static ncclResult_t uploadProxyOps(struct ncclComm* comm, struct ncclKernelPlan*
   return ncclSuccess;
 }
 
+// Prepare the cudaEvent fields in the plan for PSM.
+static ncclResult_t preparePlanForPSM(struct ncclComm* comm, struct ncclKernelPlan* plan) {
+  if (plan->proxyReadyEventSet) {
+    return ncclSuccess; // Already set
+  }
+  struct ncclKernelPlanner* planner = &comm->planner;
+  cudaStream_t launchStream = planner->streams->stream;
+  CUDACHECK(cudaEventCreate(&plan->proxyReadyEvent));
+  CUDACHECK(cudaEventRecord(plan->proxyReadyEvent, launchStream));
+  plan->proxyReadyEventSet = true;
+  return ncclSuccess;
+}
+
 static ncclResult_t hostStreamPlanTask(struct ncclComm* comm, struct ncclKernelPlan* plan) {
+  if (ncclParamPassSm()) {
+    NCCLCHECK(preparePlanForPSM(comm, plan));
+  }
   NCCLCHECK(ncclProfilerStartGroupEvent(plan));
   NCCLCHECK(ncclProfilerStartTaskEvents(plan));
   NCCLCHECK(uploadProxyOps(comm, plan));
@@ -1491,6 +1547,17 @@ ncclResult_t ncclLaunchKernelBefore_NoUncapturedCuda(struct ncclComm* comm, stru
 NCCL_PARAM(MemSyncDomain, "MEM_SYNC_DOMAIN", cudaLaunchMemSyncDomainRemote);
 #endif
 
+// Callback to synchronize with host proxy progress.
+static void CUDART_CB hostProxySyncCallback(void *plan_) {
+  NVTX3_FUNC_RANGE_IN(nccl_domain);
+  struct ncclKernelPlan* plan = (struct ncclKernelPlan*)plan_;
+  while (plan->proxyOpCount->load() != 0) {
+    // Wait for the proxy ops to be finished.
+    sched_yield();
+  }
+  return;
+}
+
 ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   ncclResult_t ret = ncclSuccess;
   struct ncclKernelPlanner* planner = &comm->planner;
@@ -1506,6 +1573,15 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
     CU_LAUNCH_PARAM_END
   };
 
+  // TODO: what if plan->kernelspecialized is true?
+  if (ncclParamPassSm() &&
+      !plan->kernelSpecialized &&
+      plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
+    NCCLCHECKGOTO(preparePlanForPSM(comm, plan), ret, do_return);
+    // Launching a cudaHostFunc() to pass sm.
+    CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan), ret, do_return);
+    goto do_return;
+  }
   int driverVersion;
   NCCLCHECKGOTO(ncclCudaDriverVersion(&driverVersion), ret, do_return);
 
