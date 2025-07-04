@@ -64,8 +64,6 @@ struct p2pShmProxyInfo {
   uint64_t step;
   cudaStream_t stream;
   cudaEvent_t events[NCCL_STEPS];
-  int buffSizes[NCCL_NUM_PROTOCOLS]; //TODO: optimize this
-  int *share_ptr; //TODO: delete this
 };
 static_assert(sizeof(p2pConnectInfo) <= CONNECT_SIZE, "P2P Connect info is too large");
 
@@ -123,7 +121,6 @@ static int busIdToCudaDev(int64_t busId) {
 // CE memcpy support
 // NCCL_PARAM(P2pUseCudaMemcpy, "P2P_USE_CUDA_MEMCPY", 0);
 static int useMemcpy = 0;
-
 extern int64_t ncclParamMNNVLEnable();
 
 /* Determine if two peers can communicate through p2p */
@@ -418,7 +415,7 @@ ncclResult_t psmP2pSendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph,
   req.refcount = 0;
   if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) req.refcount++;
   if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) req.refcount++;
-  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_P2P, 1, info->rank, &send->proxyConn));
+  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_PSM_P2P, 1, info->rank, &send->proxyConn));
   if (useMemcpy || (ncclParamPassSm() && connIndex == 1)) {
     NCCLCHECK(ncclProxyCallBlocking(comm, &send->proxyConn, ncclProxyMsgSetup, NULL, 0, &resources->proxyInfo, sizeof(struct p2pShmProxyInfo)));
     memcpy(&info->desc, &resources->proxyInfo.desc, sizeof(ncclShmIpcDesc_t));
@@ -479,7 +476,7 @@ ncclResult_t psmP2pRecvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph,
   req.refcount = 0;
   if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) req.refcount++;
   if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) req.refcount++;
-  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_P2P, 0, info->rank, &recv->proxyConn));
+  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_PSM_P2P, 0, info->rank, &recv->proxyConn));
   NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgSetup, &req, sizeof(struct ncclP2pRequest), &info->p2pBuff, sizeof(struct ncclP2pBuff)));
   INFO(NCCL_P2P, "info->p2pBuff [ recv ] = %p", info->p2pBuff.directPtr);
   NCCLCHECK(p2pMap(comm, &recv->proxyConn, myInfo, comm->peerInfo+info->rank, &info->p2pBuff, (void**)&resources->recvDevMem, &resources->recvMemIpc));
@@ -716,9 +713,8 @@ static ncclResult_t psmP2pSendProxyConnect(struct ncclProxyConnection* connectio
 
   if (reqSize != sizeof(void*)) return ncclInternalError;
   proxyInfo->recvFifo = *((char**)reqBuff);
-  INFO(NCCL_P2P, "proxyInfo->recvFifo [ set ] = %p", proxyInfo->recvFifo);
   CUDACHECK(cudaStreamCreateWithFlags(&proxyInfo->stream, cudaStreamNonBlocking));
-  for (int i=0; i<16; i++) {
+  for (int i=0; i<NCCL_STEPS; i++) {
     CUDACHECK(cudaEventCreate(proxyInfo->events+i));
   }
   connection->proxyAppendPtr = &connection->proxyAppend;
@@ -763,7 +759,6 @@ static ncclResult_t psmP2pRecvProxyFree(struct ncclProxyConnection* connection, 
     struct p2pCuMemProxyInfo *proxyInfo = (struct p2pCuMemProxyInfo *) connection->transportResources;
     if (proxyInfo) {
       struct ncclP2pBuff *p2pBuff = &proxyInfo->p2pBuff;
-      // ncclP2pFreeShareableBuffer(&p2pBuff->ipcDesc);
       psmP2pFreeShareableBuffer(&p2pBuff->ipcDesc);
       ncclCudaFree(p2pBuff->directPtr);
       free(proxyInfo);
@@ -1031,7 +1026,7 @@ ncclResult_t ret = ncclSuccess;
           CUCHECKGOTO(cuPointerGetAttribute((void*)&legacyIpcCap, CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE, (CUdeviceptr)baseAddr), ret, fail);
         }
         if (comm->gproxyConn[peerRank].initialized == false)
-          NCCLCHECKGOTO(ncclProxyConnect(comm, TRANSPORT_P2P, 1, peerRank, &comm->gproxyConn[peerRank]), ret, fail);
+          NCCLCHECKGOTO(ncclProxyConnect(comm, TRANSPORT_PSM_P2P, 1, peerRank, &comm->gproxyConn[peerRank]), ret, fail);
         proxyConn = &comm->gproxyConn[peerRank];
 
         // Get the mem handle for that buffer. It may have been allocated through cudaMalloc in which case we'll
