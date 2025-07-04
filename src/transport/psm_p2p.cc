@@ -566,6 +566,9 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
   }
   struct p2pShmProxyInfo *proxyInfo;
   proxyInfo = (struct p2pShmProxyInfo *)recv->proxyConn.connection->transportResources;
+  if (useMemcpy || ncclParamPassSm()) {
+    NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgConnect, &proxyInfo->recvFifo, sizeof(void*), NULL, 0));
+  }
   proxyInfo->recvFifo = recv->conn.buffs[NCCL_PROTO_SIMPLE];
   recv->proxyConn.proxyProgress = psmP2pTransport.recv.proxyProgress;
   return ncclSuccess;
@@ -685,7 +688,6 @@ static ncclResult_t psmP2pRecvProxySetup(struct ncclProxyConnection* connection,
   if (respSize != sizeof(struct ncclP2pBuff)) return ncclInternalError;
   struct ncclP2pBuff* p2pBuff = (struct ncclP2pBuff*)respBuff;
   NCCLCHECK(psmP2pAllocateShareableBuffer(size, req->refcount, &p2pBuff->ipcDesc, &p2pBuff->directPtr));
-  INFO(NCCL_P2P, "PSM:p2pBuff->directPtr [ global ] = %p", p2pBuff->directPtr);
   p2pBuff->size = size;
   if (ncclCuMemEnable()) {
     // cuMem API support
@@ -774,7 +776,6 @@ static ncclResult_t psmP2pRecvProxyFree(struct ncclProxyConnection* connection, 
 
 #define PSM_SHARED_STEPS 16
 static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  INFO(NCCL_P2P, "PSM: code run into psmP2pSendProxyProgress");
   if(cudaEventQuery(args->readyEvent) != cudaSuccess) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
