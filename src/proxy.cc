@@ -416,6 +416,10 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   args->state = ncclProxyOpReady;
   args->progress = op->connection->tcomm->proxyProgress;
   args->proxyAppendPtr = op->connection->proxyAppendPtr;
+
+  // args fields for Pass SM.
+  args->doneCounter = op->doneCounter;
+  args->readyEvent = op->readyEvent;
   return ncclSuccess;
 }
 

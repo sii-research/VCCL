@@ -157,7 +157,8 @@ static void addWorkBatchToPlan(
 
 // helper function to show the proxy op information
 static void showProxyOp(struct ncclProxyOp* op) {
-  printf("[%ld| %s", op->opCount, op->pattern == ncclPatternSend ? "Send" : op->pattern == ncclPatternRecv ? "Recv" : "Coll");
+  printf("[%d|%ld| %s", op->channelId, op->opCount,
+        op->pattern == ncclPatternSend ? "Send" : op->pattern == ncclPatternRecv ? "Recv" : "Coll");
   printf("]");
 }
 
@@ -1575,7 +1576,6 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
 
   // TODO: what if plan->kernelspecialized is true?
   if (ncclParamPassSm() &&
-      !plan->kernelSpecialized &&
       plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
     NCCLCHECKGOTO(preparePlanForPSM(comm, plan), ret, do_return);
     // Launching a cudaHostFunc() to pass sm.
