@@ -488,15 +488,19 @@ static ncclResult_t psmP2pSendConnect(struct ncclComm* comm, struct ncclConnect*
   NCCLCHECK(p2pMap(comm, &send->proxyConn, comm->peerInfo+rank, comm->peerInfo+info->rank, &info->p2pBuff, (void**)&remDevMem, &resources->recvMemIpc));
   resources->recvMemSameProc = P2P_SAME_PID((comm->peerInfo + rank), (comm->peerInfo + info->rank));
 
-  char* buff = (char*)(remDevMem+1);
   for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) {
-    if (info->read && p == NCCL_PROTO_SIMPLE) {
-      /* For P2P Read the SIMPLE buffer is local (ncclSendMem) */
-      if (resources->sendDevMem == NULL) return ncclInternalError; // We should not use read + memcpy
-      send->conn.buffs[p] = (char*)(resources->sendDevMem+1);
+    if (p == NCCL_PROTO_SIMPLE) {
+      if (info->read) {
+        /* For P2P Read the SIMPLE buffer is local (ncclSendMem) */
+        if (resources->sendDevMem == NULL) return ncclInternalError; // We should not use read + memcpy
+        send->conn.buffs[p] = (char*)(resources->sendDevMem+1);
+      } else {
+        /* For PSM */
+        send->conn.buffs[p] = (char*)(remDevMem+1);
+      }
     } else {
-      send->conn.buffs[p] = buff;
-      buff += comm->buffSizes[p];
+      // PSM dont't support other protocols now
+      send->conn.buffs[p] = NULL; 
     }
   }
   send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE]/NCCL_STEPS;
@@ -557,15 +561,19 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
   }
   recv->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE]/NCCL_STEPS;
 
-  char* buff = (char*)(resources->recvDevMem+1);
   for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) {
-    if (info->read && p == NCCL_PROTO_SIMPLE) {
-      if (remDevMem == NULL) return ncclInternalError; // We should not use read + memcpy
-      /* For P2P Read the SIMPLE buffer is remote (ncclSendMem) */
-      recv->conn.buffs[p] = (char*)(remDevMem+1);
+    if (p == NCCL_PROTO_SIMPLE) {
+      if (info->read) {
+        /* For P2P Read the SIMPLE buffer is local (ncclSendMem) */
+        if (resources->recvDevMem == NULL) return ncclInternalError; // We should not use read + memcpy
+        recv->conn.buffs[p] = (char*)(resources->recvDevMem+1);
+      } else {
+        /* For PSM */
+        recv->conn.buffs[p] = (char*)(remDevMem+1);
+      }
     } else {
-      recv->conn.buffs[p] = buff;
-      buff += comm->buffSizes[p];
+      // PSM dont't support other protocols now
+      recv->conn.buffs[p] = NULL; 
     }
   }
   struct p2pShmProxyInfo *proxyInfo;
@@ -575,7 +583,6 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
   recv->proxyConn.proxyProgress = psmP2pTransport.recv.proxyProgress;
   return ncclSuccess;
 }
-
 ncclResult_t psmP2pSendFree(struct ncclConnector* send) {
   struct p2pResources* resources = (struct p2pResources*)send->transportResources;
   if (resources) {
