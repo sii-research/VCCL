@@ -977,8 +977,15 @@ static ncclResult_t addP2pToPlan(
           proxyOps[dir].nbytes = partEnd - partBeg;
           proxyOps[dir].nsteps = DIVUP(proxyOps[dir].nbytes, NCCL_MAX_NET_SIZE);
         } else {
-          proxyOps[dir].nsteps = divUp(partEnd-partBeg, chunkDataSize);
-          proxyOps[dir].nbytes = std::min(partEnd-partBeg, chunkDataSize);
+          if (ncclParamPassSm()) {
+            // Pass SM needs the original address to initiate the send/recv process.
+            (dir ? proxyOps[dir].sendbuff : proxyOps[dir].recvbuff) = (uint8_t*)addr + partBeg;
+            proxyOps[dir].nbytes = partEnd-partBeg;
+            proxyOps[dir].nsteps = divUp(partEnd-partBeg, chunkDataSize);
+          } else {
+            proxyOps[dir].nsteps = divUp(partEnd-partBeg, chunkDataSize);
+            proxyOps[dir].nbytes = std::min(partEnd-partBeg, chunkDataSize);
+          }
         }
         if (proxyOps[dir].protocol == NCCL_PROTO_LL) {
           proxyOps[dir].nbytes *= 2;
