@@ -487,7 +487,7 @@ static ncclResult_t psmP2pSendConnect(struct ncclComm* comm, struct ncclConnect*
   INFO(NCCL_P2P, "PSM:info->p2pBuff [ send ] = %p", info->p2pBuff.directPtr);
   NCCLCHECK(p2pMap(comm, &send->proxyConn, comm->peerInfo+rank, comm->peerInfo+info->rank, &info->p2pBuff, (void**)&remDevMem, &resources->recvMemIpc));
   resources->recvMemSameProc = P2P_SAME_PID((comm->peerInfo + rank), (comm->peerInfo + info->rank));
-
+  char* buff = (char*)(remDevMem+1);
   for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) {
     if (p == NCCL_PROTO_SIMPLE) {
       if (info->read) {
@@ -496,7 +496,8 @@ static ncclResult_t psmP2pSendConnect(struct ncclComm* comm, struct ncclConnect*
         send->conn.buffs[p] = (char*)(resources->sendDevMem+1);
       } else {
         /* For PSM */
-        send->conn.buffs[p] = (char*)(remDevMem+1);
+        send->conn.buffs[p] = buff;
+        buff += comm->buffSizes[p];
       }
     } else {
       // PSM dont't support other protocols now
@@ -505,13 +506,17 @@ static ncclResult_t psmP2pSendConnect(struct ncclComm* comm, struct ncclConnect*
   }
   send->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE]/NCCL_STEPS;
 
-  if (useMemcpy || (ncclParamPassSm())) {
+  if (useMemcpy && !ncclParamPassSm()) {
     send->conn.tail = &resources->proxyInfo.ceRecvMem->tail;
     send->conn.connFifo = resources->proxyInfo.ceRecvMem->connFifo;
     send->conn.head = &resources->proxyInfo.devShm->sendMem.head;
     // Send SIMPLE buff to proxy, and replace it by local buffer
     NCCLCHECK(ncclProxyCallBlocking(comm, &send->proxyConn, ncclProxyMsgConnect, &send->conn.buffs[NCCL_PROTO_SIMPLE], sizeof(void*), NULL, 0));
     send->conn.buffs[NCCL_PROTO_SIMPLE] = resources->proxyInfo.ceDevBuff;
+  } else if (ncclParamPassSm()) {
+    send->conn.tail = NULL;
+    send->conn.head = NULL;
+    NCCLCHECK(ncclProxyCallBlocking(comm, &send->proxyConn, ncclProxyMsgConnect, &send->conn.buffs[NCCL_PROTO_SIMPLE], sizeof(void*), NULL, 0));
   } else {
     send->conn.tail = &remDevMem->tail;
     send->conn.head = &resources->sendDevMem->head;
@@ -531,23 +536,23 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
 
   struct ncclSendMem* remDevMem = NULL;
 
-  if (useMemcpy || ncclParamPassSm()) {
+  if (useMemcpy && !ncclParamPassSm()) {
     // Attach to peer's SHM segment
     NCCLCHECK(ncclShmImportShareableBuffer(comm, info->rank, &info->desc, (void**)&resources->shm, (void**)&resources->devShm, &resources->desc));
 
     recv->conn.tail = &resources->devShm->recvMem.tail;
     recv->conn.head = &resources->devShm->sendMem.head;
-    if(ncclParamPassSm()){
-      struct p2pCuMemProxyInfo* proxyInfo;
-      proxyInfo = (struct p2pCuMemProxyInfo *)recv->proxyConn.connection->transportResources;
-      proxyInfo->base.shm = resources->shm;
-      proxyInfo->base.devShm = resources->devShm;
-      proxyInfo->base.desc = resources->desc;
-      cudaStreamCreateWithFlags(&proxyInfo->base.stream, cudaStreamNonBlocking);
-      INFO(NCCL_P2P, "PSM:recv SHM mechanism, shm=%p", resources->shm);
-      for (int i=0; i<NCCL_STEPS; i++) {
-        CUDACHECK(cudaEventCreate(proxyInfo->base.events+i));
-      }
+  } else if (ncclParamPassSm()) {
+    NCCLCHECK(ncclShmImportShareableBuffer(comm, info->rank, &info->desc, (void**)&resources->shm, (void**)&resources->devShm, &resources->desc));
+    recv->conn.tail = NULL;
+    recv->conn.head = NULL;
+    struct p2pCuMemProxyInfo* proxyInfo;
+    proxyInfo = (struct p2pCuMemProxyInfo *)recv->proxyConn.connection->transportResources;
+    proxyInfo->base.shm = resources->shm;
+    proxyInfo->base.devShm = resources->devShm;
+    proxyInfo->base.desc = resources->desc;
+    for (int i=0; i<NCCL_STEPS; i++) {
+      CUDACHECK(cudaEventCreate(proxyInfo->base.events+i));
     }
   } else {
     NCCLCHECK(p2pMap(comm, &recv->proxyConn, comm->peerInfo+rank, comm->peerInfo+info->rank, &info->p2pBuff, (void**)&remDevMem, &resources->sendMemIpc));
@@ -561,6 +566,7 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
   }
   recv->conn.stepSize = comm->buffSizes[NCCL_PROTO_SIMPLE]/NCCL_STEPS;
 
+  char* buff = (char*)(resources->recvDevMem+1);
   for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) {
     if (p == NCCL_PROTO_SIMPLE) {
       if (info->read) {
@@ -569,7 +575,8 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
         recv->conn.buffs[p] = (char*)(resources->recvDevMem+1);
       } else {
         /* For PSM */
-        recv->conn.buffs[p] = (char*)(remDevMem+1);
+        recv->conn.buffs[p] = buff;
+        buff += comm->buffSizes[p];
       }
     } else {
       // PSM dont't support other protocols now
@@ -583,6 +590,7 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
   recv->proxyConn.proxyProgress = psmP2pTransport.recv.proxyProgress;
   return ncclSuccess;
 }
+
 ncclResult_t psmP2pSendFree(struct ncclConnector* send) {
   struct p2pResources* resources = (struct p2pResources*)send->transportResources;
   if (resources) {
@@ -655,18 +663,9 @@ static ncclResult_t psmP2pSendProxySetup(struct ncclProxyConnection* connection,
     NCCLCHECK(ncclCalloc(&proxyInfo, 1));
     connection->transportResources = proxyInfo;
 
-    NCCLCHECK(ncclCudaCalloc(&proxyInfo->ceDevBuff, proxyState->buffSizes[NCCL_PROTO_SIMPLE]));
-    INFO(NCCL_P2P, "PSM:proxyInfo->ceDevBuff[ malloc ] = %p", proxyInfo->ceDevBuff);
     // Create a SHM segment for the peer to attach to
     shmSize = sizeof(struct ncclSendMem) + sizeof(struct ncclRecvMem);
     NCCLCHECK(ncclShmAllocateShareableBuffer(shmSize, false, &proxyInfo->desc, (void**)&proxyInfo->shm, (void**)&proxyInfo->devShm));
-    if(ncclParamPassSm()) {
-      proxyInfo->shm->sendMem.head = 0;
-      proxyInfo->shm->recvMem.tail = 0;
-      memset((void*)proxyInfo->shm->recvMem.connFifo, 0, sizeof(proxyInfo->shm->recvMem.connFifo));
-      cudaStreamCreateWithFlags(&proxyInfo->stream, cudaStreamNonBlocking);
-    }
-    NCCLCHECK(ncclCudaHostCalloc(&proxyInfo->ceRecvMem, 1));
     memcpy(respBuff, proxyInfo, sizeof(struct p2pShmProxyInfo));
   } else {
     struct ncclP2pRequest* req = (struct ncclP2pRequest*)reqBuff;
@@ -732,6 +731,8 @@ static ncclResult_t psmP2pRecvProxyConnect(struct ncclProxyConnection* connectio
     proxyInfo->base.shm = shmPtrs[0];
     proxyInfo->base.devShm = shmPtrs[1];
   }
+  INFO(NCCL_P2P, "PSM Recv Proxy Connect Debug: reqBuff=%p, *((char**)reqBuff)=%p, reqSize=%d", 
+     reqBuff, *((char**)reqBuff), reqSize);
   CUDACHECK(cudaStreamCreateWithFlags(&proxyInfo->base.stream, cudaStreamNonBlocking));
   for (int i=0; i<NCCL_STEPS; i++) {
     CUDACHECK(cudaEventCreate(proxyInfo->base.events+i));
@@ -746,8 +747,8 @@ static ncclResult_t psmP2pSendProxyFree(struct ncclProxyConnection* connection, 
     struct p2pShmProxyInfo* proxyInfo = (struct p2pShmProxyInfo*)connection->transportResources;
     if (proxyInfo) {
       NCCLCHECK(ncclShmIpcClose(&proxyInfo->desc));
-      NCCLCHECK(ncclCudaHostFree(proxyInfo->ceRecvMem));
-      NCCLCHECK(ncclCudaFree(proxyInfo->ceDevBuff));
+      // NCCLCHECK(ncclCudaHostFree(proxyInfo->ceRecvMem));
+      // NCCLCHECK(ncclCudaFree(proxyInfo->ceDevBuff));
       CUDACHECK(cudaStreamDestroy(proxyInfo->stream));
       for (int i=0; i<NCCL_STEPS; i++) {
         CUDACHECK(cudaEventDestroy(proxyInfo->events[i]));
@@ -788,7 +789,6 @@ static ncclResult_t psmP2pRecvProxyFree(struct ncclProxyConnection* connection, 
   return ncclSuccess;
 }
 
-#define PSM_SHARED_STEPS 8
 static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   if(cudaEventQuery(args->readyEvent) != cudaSuccess) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
@@ -798,6 +798,7 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
       // Round to next multiple of sliceSteps
       sub->base = ROUNDUP(resources->step, args->chunkSteps);
       sub->posted = sub->transmitted = sub->done = 0;
+
       // psm specific initilization
       sub->offset = 0;
     }
@@ -806,7 +807,7 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
   args->idle = 1;
   if (args->state == ncclProxyOpProgress) {
     int p = args->protocol;
-    
+    int stepSize = proxyState->buffSizes[p] / NCCL_STEPS;
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
       struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
@@ -815,68 +816,48 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
         WARN("PSM P2P transport only supports SIMPLE protocol, got %d", p);
         return ncclInternalError;
       }
-      
       // psm post stage, copy data from userbuffer to recvFifo(receiver shm)
-      if (sub->posted < sub->nsteps && sub->posted < sub->done + NCCL_STEPS) {
-        int step = sub->posted & (PSM_SHARED_STEPS-1);
-        volatile struct ncclConnFifo* connFifo = resources->shm->recvMem.connFifo;
-        int buffSlot = step % NCCL_STEPS;
+      if (sub->transmitted < sub->done + NCCL_STEPS && sub->transmitted < sub->nsteps) {
+        int buffSlot = (sub->base + sub->transmitted) % NCCL_STEPS;
+        volatile u_int64_t* recvTail = &resources->shm->recvMem.tail;
           
-        if (connFifo[buffSlot].size == -1) {
-          int stepSize = std::min(args->chunkSize, sub->nbytes - sub->offset);
-          char* stepBuff = resources->recvFifo + (args->chunkSize * step);
+        if (*recvTail > sub->base + sub->transmitted) {
+          size_t stepOffset = sub->transmitted * args->chunkSize;
+          int size = std::min(args->chunkSize, sub->nbytes - stepOffset);
           CUDACHECK(cudaMemcpyAsync(
-              stepBuff,
-              (char *)sub->sendbuff + sub->offset,
-              stepSize, 
+              resources->recvFifo + buffSlot * args->chunkSize,
+              (char*)sub->sendbuff + stepOffset,
+              size, 
               cudaMemcpyDeviceToDevice, 
               resources->stream));
           CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
           
-          sub->offset += stepSize;
-          sub->posted += args->sliceSteps;
-          args->idle = 0;
-        }
-      }
-      // psm transmit stage, notify receiver that data is ready to be received
-      if (sub->transmitted < sub->posted) {
-        int step = sub->transmitted & (PSM_SHARED_STEPS-1);
-        int buffSlot = step % NCCL_STEPS;
-        cudaError_t res = cudaEventQuery(resources->events[buffSlot]);
-        if (res != cudaErrorNotReady) CUDACHECK(res);
-        
-        if (res == cudaSuccess) {
-          volatile struct ncclConnFifo* connFifo = resources->shm->recvMem.connFifo;
-          int stepSize = std::min(args->chunkSize, sub->nbytes - sub->transmitted * args->chunkSize);
-          connFifo[buffSlot].size = stepSize;
-
-          volatile uint64_t* sendHead = &resources->shm->sendMem.head;
-          *sendHead = sub->base + sub->transmitted + args->sliceSteps;
-
           sub->transmitted += args->sliceSteps;
           args->idle = 0;
         }
       }
+      // psm transmit stage, notify receiver that data is ready to be received
       if (sub->done < sub->transmitted) {
-        int step = (sub->done / args->sliceSteps) & (PSM_SHARED_STEPS-1);
-        int buffSlot = step % NCCL_STEPS;
-        volatile struct ncclConnFifo* connFifo = resources->shm->recvMem.connFifo;
-        
-        if (connFifo[buffSlot].size == -1) {
+        int buffSlot = (sub->base + sub->done) % NCCL_STEPS;
+
+        cudaError_t res = cudaEventQuery(resources->events[buffSlot]);
+        if (res != cudaErrorNotReady) CUDACHECK(res);
+        if (res == cudaSuccess) {
           sub->done += args->sliceSteps;
+          INFO(NCCL_P2P, "PSM send Debug: done=%ld", sub->done);
+          // Notify PSM SHM
+          resources->shm->sendMem.head = sub->base + sub->done;
           args->idle = 0;
-          
           if (sub->done == sub->nsteps) {
             resources->step = sub->base + sub->nsteps;
             args->done++;
           }
         }
-      }
+      } 
     }
-    
     if (args->done == args->nsubs) {
       args->state = ncclProxyOpNone;
-      __atomic_fetch_sub(&args->doneCounter, args->nsubs, __ATOMIC_RELAXED);
+      args->doneCounter->fetch_sub(args->nsubs);
     }
   }
   return ncclSuccess;
@@ -892,6 +873,7 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
       // Round to next multiple of sliceSteps
       sub->base = ROUNDUP(resources->step, args->chunkSteps);
       sub->posted = sub->transmitted = sub->done = 0;
+      resources->shm->recvMem.tail = sub->base + NCCL_STEPS;
       // psm specific initialization
       sub->offset = 0;
     }
@@ -900,7 +882,7 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
   args->idle = 1;
   if (args->state == ncclProxyOpProgress) {
     int p = args->protocol;
-    
+    int stepSize = proxyState->buffSizes[p] / NCCL_STEPS;
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
       struct p2pCuMemProxyInfo* cuMemProxyInfo = (struct p2pCuMemProxyInfo*) (sub->connection->transportResources);
@@ -911,55 +893,48 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
         return ncclInternalError;
       }
       
-      if (sub->posted < sub->nsteps && sub->posted < sub->done + NCCL_STEPS) {
-        // psm post stage
-        int step = sub->posted & (PSM_SHARED_STEPS-1);
-        volatile struct ncclConnFifo* connFifo = resources->shm->recvMem.connFifo;
-        int buffSlot = step % NCCL_STEPS;
+      if (sub->transmitted < sub->done + NCCL_STEPS && sub->transmitted < sub->nsteps) {
+        int buffSlot = (sub->base + sub->transmitted) % NCCL_STEPS;
+        volatile uint64_t* sendHead = &resources->shm->sendMem.head;
         
-        if (connFifo[buffSlot].size != -1) {
-          int stepSize = connFifo[buffSlot].size;
-          char* stepBuff = resources->recvFifo + (args->chunkSize * step);
+        if ((*sendHead > sub->base + sub->transmitted)) {
+          size_t stepOffset = sub->transmitted * args->chunkSize;
+          int size = std::min(args->chunkSize, sub->nbytes - stepOffset);
+          INFO(NCCL_P2P, "PSM Recv Debug: transmitted=%ld, chunkSize=%ld, nbytes=%ld, stepOffset=%ld, size=%d", 
+            sub->transmitted, args->chunkSize, sub->nbytes, stepOffset, size);
+          INFO(NCCL_P2P, "PSM Recv Debug: recvbuff=%p, recvFifo=%p, buffSlot=%d, stepSize=%d", 
+            sub->recvbuff, resources->recvFifo, buffSlot, stepSize);
           CUDACHECK(cudaMemcpyAsync(
-              (char *)sub->recvbuff + sub->offset,
-              stepBuff,
-              stepSize, 
+              (char*)sub->recvbuff + stepOffset,
+              resources->recvFifo + buffSlot * args->chunkSize,
+              size,
               cudaMemcpyDeviceToDevice, 
               resources->stream));
-          
           CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
-          
-          sub->offset += stepSize;
-          sub->posted++;
+          sub->transmitted += args->sliceSteps;
           args->idle = 0;
         }
       }
-      if (sub->transmitted < sub->posted) {
-        // psm transmit stage
-        int step = sub->transmitted & (PSM_SHARED_STEPS-1);
-        int buffSlot = step % NCCL_STEPS;
+      if (sub->done < sub->transmitted) {
+        int buffSlot = (sub->base + sub->done) % NCCL_STEPS;
         cudaError_t res = cudaEventQuery(resources->events[buffSlot]);
         if (res != cudaErrorNotReady) CUDACHECK(res);
         
         if (res == cudaSuccess) {
-          volatile struct ncclConnFifo* connFifo = resources->shm->recvMem.connFifo;
-          connFifo[buffSlot].size = -1;
-          
-          volatile uint64_t* recvTail = &resources->shm->recvMem.tail;
-          *recvTail = sub->base + sub->done + args->sliceSteps;
-
           sub->done += args->sliceSteps;
+          // Notify sender consume data
+          resources->shm->recvMem.tail = sub->base + sub->done;
           args->idle = 0;
           if (sub->done == sub->nsteps) {
-          resources->step = sub->base + sub->nsteps;
-          args->done++;
+            resources->step = sub->base + sub->nsteps;
+            args->done++;
           }
         }
       }
     }
     if (args->done == args->nsubs) {
       args->state = ncclProxyOpNone;
-      __atomic_fetch_sub(&args->doneCounter, args->nsubs, __ATOMIC_RELAXED);
+      args->doneCounter->fetch_sub(args->nsubs);
     }
   }
   return ncclSuccess;
