@@ -1556,13 +1556,14 @@ NCCL_PARAM(MemSyncDomain, "MEM_SYNC_DOMAIN", cudaLaunchMemSyncDomainRemote);
 #endif
 
 // Callback to synchronize with host proxy progress.
-static void CUDART_CB hostProxySyncCallback(void *plan_) {
+static void CUDART_CB hostProxySyncCallback(void *args) {
   NVTX3_FUNC_RANGE_IN(nccl_domain);
-  struct ncclKernelPlan* plan = (struct ncclKernelPlan*)plan_;
-  while (plan->proxyOpCount->load() != 0) {
+  std::atomic<int> *opCount = (std::atomic<int> *)args;
+  while (opCount->load() != 0) {
     // Wait for the proxy ops to be finished.
     sched_yield();
   }
+  delete opCount;
   return;
 }
 
@@ -1586,7 +1587,7 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
       plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
     NCCLCHECKGOTO(preparePlanForPSM(comm, plan), ret, do_return);
     // Launching a cudaHostFunc() to pass sm.
-    CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan), ret, do_return);
+    CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->proxyOpCount), ret, do_return);
     goto do_return;
   }
   int driverVersion;
