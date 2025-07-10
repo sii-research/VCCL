@@ -443,7 +443,7 @@ ncclResult_t psmP2pRecvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph,
   int recvSize = sizeof(struct ncclRecvMem);
   // For P2P Read the SIMPLE buffer is tagged on the end of the ncclSendMem structure
   for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) if (!(info->read && p == NCCL_PROTO_SIMPLE)) recvSize += comm->buffSizes[p];
-  if(ncclParamPassSm() && connIndex == 1) recvSize += 64 * 1024 * 1024;
+  if(ncclParamPassSm()) recvSize += 64 * 1024 * 1024;
   ALIGN_SIZE(recvSize, CUDA_IPC_MIN);
 
   if (intermediateRank == -1) {
@@ -798,7 +798,6 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
       // Round to next multiple of sliceSteps
       sub->base = ROUNDUP(resources->step, args->chunkSteps);
       sub->posted = sub->transmitted = sub->done = 0;
-
       // psm specific initilization
       sub->offset = 0;
     }
@@ -816,24 +815,23 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
         WARN("PSM P2P transport only supports SIMPLE protocol, got %d", p);
         return ncclInternalError;
       }
+      sub->nsteps = (sub->nbytes + stepSize - 1) / stepSize;
       // psm post stage, copy data from userbuffer to recvFifo(receiver shm)
       if (sub->transmitted < sub->done + NCCL_STEPS && sub->transmitted < sub->nsteps) {
         int buffSlot = (sub->base + sub->transmitted) % NCCL_STEPS;
         volatile u_int64_t* recvTail = &resources->shm->recvMem.tail;
-          
         if (*recvTail > sub->base + sub->transmitted) {
-          size_t stepOffset = sub->transmitted * args->chunkSize;
-          int size = std::min(args->chunkSize, sub->nbytes - stepOffset);
+          size_t size = std::min((size_t)stepSize, sub->nbytes - sub->offset);
           CUDACHECK(cudaMemcpyAsync(
-              resources->recvFifo + buffSlot * args->chunkSize,
-              (char*)sub->sendbuff + stepOffset,
-              size, 
+              resources->recvFifo + buffSlot * stepSize,
+              (char*)sub->sendbuff + sub->offset,
+              size,
               cudaMemcpyDeviceToDevice, 
               resources->stream));
           CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
           
           sub->transmitted += args->sliceSteps;
-          args->idle = 0;
+          sub->offset += size;
         }
       }
       // psm transmit stage, notify receiver that data is ready to be received
@@ -844,16 +842,14 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
         if (res != cudaErrorNotReady) CUDACHECK(res);
         if (res == cudaSuccess) {
           sub->done += args->sliceSteps;
-          INFO(NCCL_P2P, "PSM send Debug: done=%ld", sub->done);
           // Notify PSM SHM
           resources->shm->sendMem.head = sub->base + sub->done;
-          args->idle = 0;
-          if (sub->done == sub->nsteps) {
-            resources->step = sub->base + sub->nsteps;
-            args->done++;
-          }
         }
-      } 
+        if (sub->done == sub->nsteps) {
+          resources->step = sub->base + sub->nsteps;
+          args->done++;
+        }
+      }
     }
     if (args->done == args->nsubs) {
       args->state = ncclProxyOpNone;
@@ -892,27 +888,22 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
         WARN("PSM P2P transport only supports SIMPLE protocol, got %d", p);
         return ncclInternalError;
       }
-      
+      sub->nsteps = (sub->nbytes + stepSize - 1) / stepSize;
       if (sub->transmitted < sub->done + NCCL_STEPS && sub->transmitted < sub->nsteps) {
         int buffSlot = (sub->base + sub->transmitted) % NCCL_STEPS;
         volatile uint64_t* sendHead = &resources->shm->sendMem.head;
         
         if ((*sendHead > sub->base + sub->transmitted)) {
-          size_t stepOffset = sub->transmitted * args->chunkSize;
-          int size = std::min(args->chunkSize, sub->nbytes - stepOffset);
-          INFO(NCCL_P2P, "PSM Recv Debug: transmitted=%ld, chunkSize=%ld, nbytes=%ld, stepOffset=%ld, size=%d", 
-            sub->transmitted, args->chunkSize, sub->nbytes, stepOffset, size);
-          INFO(NCCL_P2P, "PSM Recv Debug: recvbuff=%p, recvFifo=%p, buffSlot=%d, stepSize=%d", 
-            sub->recvbuff, resources->recvFifo, buffSlot, stepSize);
+          size_t size = std::min((size_t)stepSize, sub->nbytes - sub->offset);
           CUDACHECK(cudaMemcpyAsync(
-              (char*)sub->recvbuff + stepOffset,
-              resources->recvFifo + buffSlot * args->chunkSize,
+              (char*)sub->recvbuff + sub->offset,
+              resources->recvFifo + buffSlot * stepSize,
               size,
               cudaMemcpyDeviceToDevice, 
               resources->stream));
           CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
           sub->transmitted += args->sliceSteps;
-          args->idle = 0;
+          sub->offset += size;
         }
       }
       if (sub->done < sub->transmitted) {
@@ -923,12 +914,11 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
         if (res == cudaSuccess) {
           sub->done += args->sliceSteps;
           // Notify sender consume data
-          resources->shm->recvMem.tail = sub->base + sub->done;
-          args->idle = 0;
-          if (sub->done == sub->nsteps) {
-            resources->step = sub->base + sub->nsteps;
-            args->done++;
-          }
+          resources->shm->recvMem.tail = sub->base + sub->done + NCCL_STEPS;
+        }
+        if (sub->done == sub->nsteps) {
+          resources->step = sub->base + sub->nsteps;
+          args->done++;
         }
       }
     }
