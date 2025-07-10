@@ -109,6 +109,9 @@ struct sendNetResources {
   ncclNetDeviceType netDeviceType;
   ncclNetDeviceHandle_t* netDeviceHandle;
   size_t maxP2pBytes;
+
+  cudaEvent_t events[NCCL_STEPS];
+  cudaStream_t stream;
 };
 
 struct recvNetResources {
@@ -142,6 +145,9 @@ struct recvNetResources {
   ncclNetDeviceType netDeviceType;
   ncclNetDeviceHandle_t* netDeviceHandle;
   size_t maxP2pBytes;
+
+  cudaEvent_t events[NCCL_STEPS];
+  cudaStream_t stream;
 };
 
 struct netRegInfo {
@@ -215,7 +221,7 @@ static ncclResult_t sendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   if (!req.useGdr && connIndex == 0) comm->useGdr = 0;
   if (proxyRank != myInfo->rank && connIndex == 0) comm->useNetPXN = true;
 
-  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_NET, 1, proxyRank, &send->proxyConn));
+  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_PSM_NET, 1, proxyRank, &send->proxyConn));
   req.tpLocalRank = comm->topParentLocalRanks[comm->localRank];
   req.tpRank = comm->topParentRanks[myInfo->rank];
   req.tpRemoteRank = comm->topParentRanks[peerInfo->rank];
@@ -261,7 +267,7 @@ static ncclResult_t recvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   if (req.useGdr) NCCLCHECK(ncclTopoNeedFlush(comm, netId, req.netDev, myInfo->rank, &req.needFlush));
 
   // We don't support PXN on receive yet
-  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_NET, 0, myInfo->rank, &recv->proxyConn));
+  NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_PSM_NET, 0, myInfo->rank, &recv->proxyConn));
 
   req.tpLocalRank = comm->topParentLocalRanks[comm->localRank];
   req.tpRank = comm->topParentRanks[myInfo->rank];
@@ -864,6 +870,12 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
   //NCCLCHECK(netDumpMap(map));
   if (respSize != sizeof(struct connectMap)) return ncclInternalError;
   memcpy(respBuff, map, sizeof(struct connectMap));
+
+  // init cuda event for psm cudaMemcpyAsync
+  cudaStreamCreateWithFlags(&(resources->stream), cudaStreamNonBlocking);
+  for (int i = 0; i < NCCL_STEPS; i++) {
+    CUDACHECK(cudaEventCreate(resources->events + i));
+  }
   return ncclSuccess;
 }
 
@@ -1008,6 +1020,12 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
   //NCCLCHECK(netDumpMap(map));
   if (respSize != sizeof(struct connectMap)) return ncclInternalError;
   memcpy(respBuff, map, sizeof(struct connectMap));
+
+  cudaStreamCreateWithFlags(&(resources->stream), cudaStreamNonBlocking);
+  // init cuda event for psm cudaMemcpyAsync
+  for (int i = 0; i < NCCL_STEPS; i++) {
+    CUDACHECK(cudaEventCreate(resources->events + i));
+  }
   return ncclSuccess;
 }
 
@@ -1052,6 +1070,11 @@ static ncclResult_t sendProxyFree(struct ncclProxyConnection* connection, struct
     }
   }
 
+  CUDACHECK(cudaStreamDestroy(resources->stream));
+  for (int i = 0; i < NCCL_STEPS; i++) {
+    CUDACHECK(cudaEventDestroy(resources->events[i]));
+  }
+
   if (resources) free(resources);
   return ncclSuccess;
 }
@@ -1093,6 +1116,11 @@ static ncclResult_t recvProxyFree(struct ncclProxyConnection* connection, struct
     }
   }
 
+  CUDACHECK(cudaStreamDestroy(resources->stream));
+  for (int i = 0; i < NCCL_STEPS; i++) {
+    CUDACHECK(cudaEventDestroy(resources->events[i]));
+  }
+
   if (resources) free(resources);
   return ncclSuccess;
 }
@@ -1100,6 +1128,7 @@ static ncclResult_t recvProxyFree(struct ncclProxyConnection* connection, struct
 static_assert(NCCL_STEPS <= NCCL_NET_MAX_REQUESTS, "Not enough net requests to cover for steps");
 
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
+  if (cudaEventQuery(args->readyEvent) != cudaSuccess) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
@@ -1129,116 +1158,125 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
       volatile struct ncclConnFifo* connFifo = (volatile struct ncclConnFifo*)resources->recvMem->connFifo;
       int stepSize = resources->buffSizes[p] / NCCL_STEPS;
       char* localBuff = NCCL_NET_MAP_GET_POINTER(&resources->map, cpu, buffs[p]);
-      // Post buffers to the GPU
+      cudaEvent_t* copyEvents = resources->events;
+
+      // Post Buffers to the GPU and use the cudaMemcpyAsync to copy data from the user buffer to the staging buffer
       if (sub->posted < sub->nsteps && sub->posted < sub->done + maxDepth) {
         ncclProfilerStartSendProxyStepEvent(s, args, postedStepId);
         int buffSlot = (sub->base+sub->posted)%NCCL_STEPS;
+        bool shared = (p == NCCL_PROTO_SIMPLE) && resources->shared;
+
+        if (resources->shared && !sub->reg) {
+          int sharedBuffSlot = sub->posted%maxDepth;
+          int offset;
+          NCCLCHECK(sharedBuffersGet(proxyState, sub->channelId, sharedBuffSlot*args->nsubs+s, &offset, NULL));
+          resources->recvMem->connFifo[buffSlot].offset = offset;
+          __sync_synchronize();
+        }
+
+        // 计算源地址和实际数据大小
+        size_t srcOffset = sub->posted * stepSize;
+        size_t remainingBytes = sub->nbytes - srcOffset;
+        int actualSize = std::min((size_t)(stepSize * args->sliceSteps), remainingBytes);
+
+        char* srcAddr = (char*)sub->sendbuff + srcOffset;
+        char* dstAddr = shared ? localBuff+connFifo[buffSlot].offset : localBuff+buffSlot*stepSize;;
+
+        // 处理不同的缓冲区模式
         if (resources->shared) {
-          if (!sub->reg) {
-            int sharedBuffSlot = sub->posted%maxDepth;
-            int offset;
-            NCCLCHECK(sharedBuffersGet(proxyState, sub->channelId, sharedBuffSlot*args->nsubs+s, &offset, NULL));
-            resources->recvMem->connFifo[buffSlot].offset = offset;
-            __sync_synchronize();
-          }
-          volatile uint64_t* sendHead = resources->gdcSync ? resources->gdcSync : &resources->sendMem->head;
-          sub->posted += args->sliceSteps;
-          *sendHead = sub->base + sub->posted - NCCL_STEPS;
-          if (resources->gdcSync) wc_store_fence(); // Flush out WC write
-        } else {
-          sub->posted += args->sliceSteps;
+          // no need for D2D copy in registered memory mode
+          dstAddr = sub->reg ? NULL : localBuff + resources->recvMem->connFifo[buffSlot].offset;
         }
-        ncclProfilerRecordProxyOpEventState(s, args, sub->posted, sub->transSize, ncclProfilerProxyOpSendPosted);
-        ncclProfilerRecordProxyStepEventState(s, args, postedStepId, ncclProfilerProxyStepSendGPUWait);
-        args->idle = 0;
-        continue;
+
+        // 执行D2D拷贝（如果需要）
+        if (connFifo[buffSlot].size == -1) {
+          if (dstAddr != NULL) {
+            CUDACHECK(cudaMemcpyAsync(dstAddr, srcAddr, actualSize,
+                                      cudaMemcpyDeviceToDevice, resources->stream));
+            CUDACHECK(cudaEventRecord(copyEvents[buffSlot], resources->stream));
+          }
+          // 设置connFifo的size（为了兼容性和调试）
+          connFifo[buffSlot].size = actualSize;
+          
+          // 推进posted计数
+          sub->posted += args->sliceSteps;
+
+          args->idle = 0;
+          continue;
+        }
+        // 如果connFifo[buffSlot].size != -1，表示该缓冲区已被使用，并且还未完成网络发送，继续向下执行逻辑
       }
-      // Check whether we received data from the GPU and send it to the network
+
+      // Check whether we completed some cudaMemcpyAsync operations.
       if (sub->transmitted < sub->posted && sub->transmitted < sub->done + NCCL_STEPS) {
-        int buffSlot = (sub->base+sub->transmitted)%NCCL_STEPS;
-        volatile uint64_t* recvTail = &resources->recvMem->tail;
-        uint64_t tail = sub->base + sub->transmitted;
-        if (connFifo[buffSlot].size != -1 && (*recvTail > tail || p == NCCL_PROTO_LL)) {
-          // We have something to receive, let's check if it's completely ready.
-          int size = connFifo[buffSlot].size;
-          bool shared = (p == NCCL_PROTO_SIMPLE) && resources->shared;
-          char* buff = shared ? localBuff+connFifo[buffSlot].offset : localBuff+buffSlot*stepSize;
-          int ready = 1;
-          if (p == NCCL_PROTO_LL128) {
-            ready = resources->useGdr;
-            if (!ready) {
-              // When data is in sysmem, we need to wait until all flags are correct since the GPU only
-              // called threadfence()
-              uint64_t flag = sub->base+sub->transmitted+1;
-              int nFifoLines = DIVUP(connFifo[buffSlot].size, sizeof(uint64_t)*NCCL_LL128_LINEELEMS);
-              volatile uint64_t* lines = (volatile uint64_t*)buff;
-              ready = 1;
-              for (int i=0; i<nFifoLines; i++) {
-                if (lines[i*NCCL_LL128_LINEELEMS+NCCL_LL128_DATAELEMS] != flag) { ready = 0; break; }
-              }
-            }
-          } else if (p == NCCL_PROTO_LL) {
-            uint32_t flag = NCCL_LL_FLAG(sub->base+sub->transmitted+1);
-            int nFifoLines = DIVUP(size, sizeof(union ncclLLFifoLine));
-            union ncclLLFifoLine* lines = (union ncclLLFifoLine*)buff;
-            for (int i=0; i<nFifoLines; i++) {
-              volatile uint32_t *f1 = &lines[i].flag1;
-              volatile uint32_t *f2 = &lines[i].flag2;
-              if (f1[0] != flag || f2[0] != flag) { ready = 0; break; }
-            }
-          } else if (p == NCCL_PROTO_SIMPLE) {
-            if (resources->shared) {
-              buff = sub->reg ? (char*)sub->sendbuff + sub->transmitted * NCCL_MAX_NET_SIZE : localBuff + resources->recvMem->connFifo[buffSlot].offset;
-            } else if (sub->reg) {
-              size_t sendSize;
-              sub->ringAlgo->getNextSendAddr(sub->transmitted, (uint8_t**)&buff, &sendSize, &sub->sendMhandle);
-              assert(sendSize == size);
-            }
-          }
-          if (ready) {
-            ncclProfilerRecordProxyOpEventState(s, args, sub->transmitted+args->sliceSteps, sub->transSize, ncclProfilerProxyOpSendRemFifoWait);
-            // Data is ready, try to send.
-            // Coverity complains about the size here as pointing to an out-of-scope temporary.  Which is nonsense,
-            // since size is a plain integer.
-            // coverity[use_invalid:FALSE]
-            NCCLCHECK(proxyState->ncclNet->isend(resources->netSendComm, buff, size, resources->tpRank, sub->sendMhandle, sub, sub->requests+buffSlot));
-            if (sub->requests[buffSlot] != NULL) {
-              TRACE(NCCL_NET, "sendProxy [%ld/%d/%d] Isend posted, req %p, buff %p, size %d, proto %d, myRank %d, channelId %d, mhandle %p", sub->transmitted, buffSlot, sub->nsteps, sub->requests[buffSlot], buff, size, p, proxyState->tpRank, sub->channelId, sub->sendMhandle);
-              sub->transSize += size;
-              sub->transmitted += args->sliceSteps;
-              sub->profilerSteps++;
-              ncclProfilerRecordProxyOpEventState(s, args, sub->transmitted, sub->transSize, ncclProfilerProxyOpSendTransmitted);
-              ncclProfilerRecordProxyStepEventState(s, args, transmittedStepId, ncclProfilerProxyStepSendWait);
-              args->idle = 0;
-              continue;
-            }
+        int buffSlot = (sub->base + sub->transmitted) % NCCL_STEPS;
+        int size = connFifo[buffSlot].size;
+        bool shared = (p == NCCL_PROTO_SIMPLE) && resources->shared;
+        char* buff = shared ? localBuff+connFifo[buffSlot].offset : localBuff+buffSlot*stepSize;
+        int ready = 0;
+
+        // 目前无核实现仅限simple协议 
+        assert(p == NCCL_PROTO_SIMPLE);
+
+        // 复用原生net实现
+        if (resources->shared) {
+          buff = sub->reg ? (char*)sub->sendbuff + sub->transmitted * NCCL_MAX_NET_SIZE : localBuff + resources->recvMem->connFifo[buffSlot].offset;
+        } else if (sub->reg) {
+          size_t sendSize;
+          sub->ringAlgo->getNextSendAddr(sub->transmitted, (uint8_t**)&buff, &sendSize, &sub->sendMhandle);
+          assert(sendSize == size);
+        }
+
+        if (sub->reg) {
+          ready = 1;
+        } else if (cudaEventQuery(copyEvents[buffSlot]) == cudaSuccess) {
+          ready = 1;
+        }
+
+        if (ready) {
+          // 发送数据到网络
+          NCCLCHECK(proxyState->ncclNet->isend(resources->netSendComm, buff, size,
+                                                resources->tpRank, sub->sendMhandle,
+                                                sub, sub->requests + buffSlot));
+
+          if (sub->requests[buffSlot] != NULL) {
+            TRACE(NCCL_NET, "sendProxyNoKernel [%ld/%d/%d] Isend posted, req %p, buff %p, size %d",
+                  sub->transmitted, buffSlot, sub->nsteps, sub->requests[buffSlot], buff, size);
+            sub->transSize += size;
+            sub->transmitted += args->sliceSteps;
+            sub->profilerSteps++;
+            args->idle = 0;
+            continue;
           }
         }
       }
+
       // Check whether the network has completed some send operations.
       if (sub->done < sub->transmitted) {
         int done;
         int size;
-        int buffSlot = (sub->base+sub->done)%NCCL_STEPS;
+        int buffSlot = (sub->base + sub->done) % NCCL_STEPS;
+
         NCCLCHECK(proxyState->ncclNet->test(sub->requests[buffSlot], &done, &size));
+
         if (done) {
-          // Make sure size is reset to -1 before we update the head.
+          // 重置size表示槽位可用
           connFifo[buffSlot].size = -1;
           __sync_synchronize();
-          TRACE(NCCL_NET, "sendProxy [%ld/%d/%d] request %p done", sub->done, buffSlot, sub->nsteps, sub->requests[buffSlot]);
-          sub->done += args->sliceSteps;
-          ncclProfilerStopProxyStepEvent(s, args, doneStepId);
-          ncclProfilerRecordProxyOpEventState(s, args, sub->done, sub->transSize, ncclProfilerProxyOpSendDone);
 
-          if (resources->shared == 0) {
-            volatile uint64_t* sendHead = resources->gdcSync ? resources->gdcSync : &resources->sendMem->head;
-            *sendHead = sub->base + sub->done;
-            if (resources->gdcSync) wc_store_fence(); // Flush out WC write
-          }
+          TRACE(NCCL_NET, "sendProxyNoKernel [%ld/%d/%d] request %p done",
+                sub->done, buffSlot, sub->nsteps, sub->requests[buffSlot]);
+
+          sub->done += args->sliceSteps;
+
           args->idle = 0;
+
+          // 检查是否全部完成
           if (sub->done == sub->nsteps) {
             args->done++;
-            if (sub->ringAlgo && sub->ringAlgo->decRefCount() == 0) delete sub->ringAlgo;
+            if (sub->ringAlgo && sub->ringAlgo->decRefCount() == 0) {
+              delete sub->ringAlgo;
+            }
             sub->ringAlgo = NULL;
           }
         }
@@ -1249,6 +1287,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         ncclProfilerStopProxyOpEvent(s, args);
       }
       args->state = ncclProxyOpNone;
+      args->doneCounter->fetch_sub(args->nsubs);
     }
   }
   return ncclSuccess;
@@ -1464,16 +1503,43 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         if (done) {
           for (int i=0; i<subGroup->groupSize; i++) {
             struct ncclProxySubArgs* sub = subGroup + i;
+            struct recvNetResources* resources = (struct recvNetResources*) (sub->connection->transportResources);
             int transmittedStepId = sub->transmitted;
+            int stepSize = resources->buffSizes[p] / NCCL_STEPS;
 
-            sub->transmitted += args->sliceSteps;
             ncclProfilerRecordProxyOpEventState(s+i, args, sub->transmitted, sub->transSize, ncclProfilerProxyOpRecvTransmitted);
             ncclProfilerRecordProxyStepEventState(s+i, args, transmittedStepId, ncclProfilerProxyStepRecvGPUWait);
             if (step < sub->nsteps) {
+              // 计算源地址
+              char* srcPtr;
+              char* dstPtr;
+
+              char* localBuff = NCCL_NET_MAP_GET_POINTER(&resources->map, cpu, buffs[p]);
+              int  buffSlot = (sub->base + sub->transmitted) % NCCL_STEPS;
+              
+              /* === 找到 staging buffer 源地址，与阶段 2 完全等价 === */
+              if (resources->shared) {
+                srcPtr = sub->reg ? NULL : localBuff + resources->recvMem->connFifo[buffSlot].offset;
+              } else {
+                srcPtr = sub->reg ? NULL : localBuff + buffSlot * stepSize;
+              }
+
+
+              // 计算源地址和实际数据大小
+              size_t dstOffset = sub->transmitted * stepSize;
+              size_t remainingBytes = sub->nbytes - dstOffset;
+              int actualSize = std::min((size_t)(stepSize*args->sliceSteps), remainingBytes);
+
+              dstPtr = (char*)sub->recvbuff + dstOffset;
+
+              if (srcPtr != NULL) {
+                CUDACHECK(cudaMemcpyAsync(dstPtr, srcPtr, actualSize, cudaMemcpyDeviceToDevice, resources->stream));
+                CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
+              }
+              
+              
+              sub->transmitted += args->sliceSteps;
               __sync_synchronize();
-              struct recvNetResources* resources = (struct recvNetResources*) (sub->connection->transportResources);
-              volatile uint64_t* recvTail = resources->gdcSync ? resources->gdcSync : &resources->recvMem->tail;
-              *recvTail = sub->base + sub->transmitted;
               if (resources->gdcSync) wc_store_fence(); // Flush out WC write
             }
           }
@@ -1491,9 +1557,9 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         if (sub->done == sub->nsteps) continue;
         if (sub->transmitted > sub->done) {
           struct recvNetResources* resources = (struct recvNetResources*) (sub->connection->transportResources);
-          volatile uint64_t* sendHead = &resources->sendMem->head;
-          uint64_t done = *sendHead;
-          while (done > sub->base + sub->done &&
+          int  buffSlot = (sub->base + sub->done) % NCCL_STEPS;
+
+          while ((cudaEventQuery(resources->events[buffSlot]) == cudaSuccess) &&
               // LL and LL128 can acknowledge 0-bytes send before they even happen. Don't go past what we transmitted.
               sub->transmitted > sub->done) {
             if (subGroup->recvRequestsCache[sub->done%NCCL_STEPS]) {
@@ -1506,6 +1572,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
             ncclProfilerStopProxyStepEvent(s+i, args, doneStepId);
             ncclProfilerRecordProxyOpEventState(s+i, args, sub->done, sub->transSize, ncclProfilerProxyOpRecvDone);
             args->idle = 0;
+            buffSlot = (sub->base + sub->done) % NCCL_STEPS;
             if (sub->done == sub->nsteps) {
               args->done++;
               if (sub->ringAlgo && sub->ringAlgo->decRefCount() == 0) delete sub->ringAlgo;
@@ -1518,6 +1585,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
     }
     if (args->done == args->nsubs) {
       args->state = ncclProxyOpNone;
+      args->doneCounter->fetch_sub(args->nsubs);
       for (int s=0; s<args->nsubs; s++) {
         ncclProfilerStopProxyOpEvent(s, args);
       }
@@ -1749,7 +1817,7 @@ static ncclResult_t recvProxyDeregBuffer(struct ncclProxyConnection* connection,
 }
 
 struct ncclTransport psmNetTransport = {
-  "NET",
+  "PSM_NET",
   canConnect,
   { sendSetup, sendConnect, sendFree, proxySharedInit, sendProxySetup, sendProxyConnect, sendProxyFree, sendProxyProgress, sendProxyRegBuffer, sendProxyDeregBuffer },
   { recvSetup, recvConnect, recvFree, proxySharedInit, recvProxySetup, recvProxyConnect, recvProxyFree, recvProxyProgress, recvProxyRegBuffer, recvProxyDeregBuffer }
