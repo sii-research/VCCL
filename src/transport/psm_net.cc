@@ -797,6 +797,11 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
       resources->buffSizes[NCCL_PROTO_LL] = proxyState->buffSizes[NCCL_PROTO_LL];
     }
 
+    if (resources->useGdr) {
+      printf("We use Gdr!");
+    } else {
+      printf("We did not use Gdr!");
+    }
     NCCL_NET_MAP_ADD_POINTER(map, 1, resources->useGdr ? 1 : 0, mapMem->size, buffs[NCCL_PROTO_SIMPLE]);
   }
 
@@ -1146,6 +1151,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
   }
   args->idle = 1;
   if (args->state == ncclProxyOpProgress) {
+    // printf("\033[34m Begin sendProxyProgress. \033[0m \n");
     int p = args->protocol;
     int maxDepth = std::min(NCCL_STEPS, NCCL_SHARED_STEPS/args->nsubs);
     for (int s=0; s<args->nsubs; s++) {
@@ -1165,19 +1171,24 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         ncclProfilerStartSendProxyStepEvent(s, args, postedStepId);
         int buffSlot = (sub->base+sub->posted)%NCCL_STEPS;
         bool shared = (p == NCCL_PROTO_SIMPLE) && resources->shared;
+	size_t size;
 
         if (resources->shared && !sub->reg) {
           int sharedBuffSlot = sub->posted%maxDepth;
           int offset;
-          NCCLCHECK(sharedBuffersGet(proxyState, sub->channelId, sharedBuffSlot*args->nsubs+s, &offset, NULL));
+          NCCLCHECK(sharedBuffersGet(proxyState, sub->channelId, sharedBuffSlot*args->nsubs+s, &offset, &size));
           resources->recvMem->connFifo[buffSlot].offset = offset;
           __sync_synchronize();
         }
 
         // 计算源地址和实际数据大小
-        size_t srcOffset = sub->posted * stepSize;
+        size_t srcOffset = sub->posted * size;
         size_t remainingBytes = sub->nbytes - srcOffset;
-        int actualSize = std::min((size_t)(stepSize * args->sliceSteps), remainingBytes);
+
+        int actualSize = std::min((size_t)size, remainingBytes);
+	// size_t srcOffset = actualSize;
+	// printf("\033[31m size is %ld. \033[0m \n", size);
+	// printf("\033[31m stepSize is %d, sliceSteps is %d. \033[0m \n", stepSize, args->sliceSteps);
 
         char* srcAddr = (char*)sub->sendbuff + srcOffset;
         char* dstAddr = shared ? localBuff+connFifo[buffSlot].offset : localBuff+buffSlot*stepSize;;
@@ -1190,7 +1201,28 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
 
         // 执行D2D拷贝（如果需要）
         if (connFifo[buffSlot].size == -1) {
+	  // printf("\033[31m connfifo size is -1 \033[0m \n");
           if (dstAddr != NULL) {
+            
+	    // printf("\033[31m sub->posted is %d, secOffset is %ld, ready to copy %d in sendProxyProgress, src: %p, dst: %p. \033[0m \n", sub->posted, srcOffset, actualSize, srcAddr, dstAddr);
+	    cudaPointerAttributes srcAttr, dstAttr;
+   	    cudaError_t srcErr = cudaPointerGetAttributes(&srcAttr, srcAddr);	
+	    cudaError_t dstErr = cudaPointerGetAttributes(&dstAttr, dstAddr);
+
+   	    if (srcErr != cudaSuccess) {
+    		// printf("Source pointer is not a valid CUDA pointer\n");
+	    }
+	    if (dstErr != cudaSuccess) {
+    		// printf("Destination pointer is not a valid CUDA pointer\n");
+	    }
+
+	    // 检查内存类型
+	    if (srcAttr.type != cudaMemoryTypeDevice) {
+    		printf("Source is not device memory\n");
+	    }
+	    if (dstAttr.type != cudaMemoryTypeDevice) {
+    		printf("Destination is not device memory\n");
+	    }
             CUDACHECK(cudaMemcpyAsync(dstAddr, srcAddr, actualSize,
                                       cudaMemcpyDeviceToDevice, resources->stream));
             CUDACHECK(cudaEventRecord(copyEvents[buffSlot], resources->stream));
@@ -1230,7 +1262,8 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         if (sub->reg) {
           ready = 1;
         } else if (cudaEventQuery(copyEvents[buffSlot]) == cudaSuccess) {
-          ready = 1;
+          // printf("\033[36m Send copy finished! \033[0m \n"); 
+	  ready = 1;
         }
 
         if (ready) {
@@ -1337,6 +1370,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
   }
   args->idle = 1;
   if (args->state == ncclProxyOpProgress) {
+    // printf("\033[34m Begin recvProxyProgress. \033[0m \n");
     int p = args->protocol;
     int maxDepth = std::min(NCCL_STEPS, NCCL_SHARED_STEPS/args->nsubs);
     for (int s=0; s<args->nsubs; s+=args->subs[s].groupSize) {
@@ -1367,10 +1401,12 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
                 ptrs[subCount] = sub->recvbuff + sub->posted * NCCL_MAX_NET_SIZE;
                 sizes[subCount] = std::min(NCCL_MAX_NET_SIZE, (ssize_t)(sub->nbytes - sub->posted * NCCL_MAX_NET_SIZE));
               } else {
+		// printf("\033[31m reg: false; shared: true; \033[0m \n");
                 int sharedBuffSlot = sub->posted % maxDepth;
                 int offset;
                 NCCLCHECK(sharedBuffersGet(proxyState, sub->channelId, sharedBuffSlot * args->nsubs + s + i, &offset, sizes + subCount));
-                connFifo[buffSlot].offset = offset;
+                // printf("\033[31m sizes[subCount] is %ld \033[0m \n", sizes[subCount]);
+		connFifo[buffSlot].offset = offset;
                 ptrs[subCount] = localBuff + offset;
               }
             } else {
@@ -1526,14 +1562,16 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
 
 
               // 计算源地址和实际数据大小
-              size_t dstOffset = sub->transmitted * stepSize;
+	      size_t size = proxyState->p2pChunkSize;
+              size_t dstOffset = sub->transmitted * size;
               size_t remainingBytes = sub->nbytes - dstOffset;
-              int actualSize = std::min((size_t)(stepSize*args->sliceSteps), remainingBytes);
+              int actualSize = std::min((size_t)(size), remainingBytes);
 
               dstPtr = (char*)sub->recvbuff + dstOffset;
-
-              if (srcPtr != NULL) {
-                CUDACHECK(cudaMemcpyAsync(dstPtr, srcPtr, actualSize, cudaMemcpyDeviceToDevice, resources->stream));
+	      
+              if (srcPtr != NULL && (cudaEventQuery(resources->events[buffSlot]) == cudaSuccess)) {
+                // printf("\033[31m ready to copy %d in recvProxyProgress. \033[0m \n", actualSize);
+		CUDACHECK(cudaMemcpyAsync(dstPtr, srcPtr, actualSize, cudaMemcpyDeviceToDevice, resources->stream));
                 CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
               }
               
