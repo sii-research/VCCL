@@ -258,7 +258,7 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
     plan->proxyOpCount = new std::atomic<int>(proxyOpCnt);
   }
 
-  printPlanProxyOp(comm, plan);
+  // printPlanProxyOp(comm, plan);
 }
 
 NCCL_PARAM(GraphRegister, "GRAPH_REGISTER", 1);
@@ -1072,6 +1072,13 @@ static ncclResult_t scheduleP2pTasksToPlan(
         ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, send);
         ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, recv);
         comm->planner.nTasksP2p -= 2;
+      } else if (ncclParamPassSm() && (sendRank == comm->rank && send->buff != recv->buff)) {
+        NCCLCHECK(ncclCudaMemcpy((char *)recv->buff, (char *)send->buff, send->bytes));
+        ncclIntruQueueDequeue(&peers[sendRank].sendQueue);
+        ncclIntruQueueDequeue(&peers[recvRank].recvQueue);
+        ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, send);
+        ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, recv);
+        comm->planner.nTasksP2p -= 2; 
       } else {
         // Ensure room for worst case of one new batch per channel.
         if (!testBudget(budget, plan->nWorkBatches+nChannelsMax, plan->workBytes + sizeof(struct ncclDevWorkP2p))) {
