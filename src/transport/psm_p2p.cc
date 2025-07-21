@@ -67,6 +67,7 @@ struct p2pShmProxyInfo {
   uint64_t step;
   cudaStream_t stream;
   cudaEvent_t events[PSM_STEPS];
+  cudaStream_t cpStream;
 };
 static_assert(sizeof(p2pConnectInfo) <= CONNECT_SIZE, "PSM P2P Connect info is too large");
 
@@ -576,10 +577,6 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
   proxyInfo->devShm = resources->devShm;
   proxyInfo->desc = resources->desc;
   proxyInfo->recvFifo = recv->conn.buffs[NCCL_PROTO_SIMPLE];
-  CUDACHECK(cudaStreamCreateWithFlags(&proxyInfo->stream, cudaStreamNonBlocking));
-  for (int i=0; i<PSM_STEPS; i++) {
-    CUDACHECK(cudaEventCreate(proxyInfo->events+i));
-  }
   recv->proxyConn.proxyProgress = psmP2pTransport.recv.proxyProgress;
   NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgConnect, NULL, 0, NULL, 0));
   return ncclSuccess;
@@ -721,6 +718,11 @@ static ncclResult_t psmP2pSendProxyConnect(struct ncclProxyConnection* connectio
 }
 
 static ncclResult_t psmP2pRecvProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
+  struct p2pShmProxyInfo* proxyInfo = (struct p2pShmProxyInfo*)connection->transportResources;
+  // CUDACHECK(cudaStreamCreateWithFlags(&proxyInfo->stream, cudaStreamNonBlocking));
+  for (int i=0; i<PSM_STEPS; i++) {
+    CUDACHECK(cudaEventCreate(proxyInfo->events+i));
+  }
   connection->proxyAppendPtr = &connection->proxyAppend;
   *done=1;
   return ncclSuccess;
@@ -801,6 +803,7 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
       int p = args->protocol;
       sub->chunkSize = proxyState->buffSizes[p] / PSM_STEPS;
       sub->nsteps=(sub->nbytes + sub->chunkSize - 1) / sub->chunkSize;
+      resources->shm->sendMem.head = sub->base;
       sub->offset = 0;
     }
     args->state = ncclProxyOpProgress;
@@ -842,7 +845,8 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
         if (res == cudaSuccess) {
           sub->done += args->sliceSteps;
           // Notify PSM SHM
-          resources->shm->sendMem.head = sub->base + sub->done;
+          volatile uint64_t* sendHead = &resources->shm->sendMem.head;
+          *sendHead = sub->base + sub->done;
         }
         if (sub->done == sub->nsteps) {
           resources->step = sub->base + sub->nsteps;
@@ -889,7 +893,7 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
       if (sub->transmitted < sub->done + PSM_STEPS && sub->transmitted < sub->nsteps) {
         int buffSlot = (sub->base + sub->transmitted) % PSM_STEPS;
         volatile uint64_t* sendHead = &resources->shm->sendMem.head;
-        
+
         if ((*sendHead > sub->base + sub->transmitted)) {
           size_t size = std::min((size_t)sub->chunkSize, sub->nbytes - sub->offset);
           CUDACHECK(cudaMemcpyAsync(
