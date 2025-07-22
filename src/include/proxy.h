@@ -107,7 +107,7 @@ struct ncclProxyOp {
   // ReadyEvent field is queried by proxy progress thread to check if the data is ready to be sent/recv.
   // DoneCounter is used to track the number of completed proxyOps.
   // The lifetime of this counter is beyond the lifetime of the proxyOp.
-  cudaEvent_t readyEvent;
+  std::atomic<int>* readyEvent;
   std::atomic<int>* doneCounter;
 
   struct ncclProxyOp *enqNext;
@@ -189,7 +189,7 @@ struct ncclProxyArgs {
   struct ncclProxyArgs* next;
   struct ncclProxyArgs* nextPeer;
   struct ncclProxyArgs** proxyAppendPtr;
-  cudaEvent_t readyEvent;
+  std::atomic<int>* readyEvent;
   std::atomic<int>* doneCounter;
 
   union ncclProxyOpSpecifics specifics;

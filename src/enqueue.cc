@@ -255,9 +255,11 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   // 2. the second part is to prepare proxyOpCount, which is done here.
   // Better to keep the two parts together.
   if (ncclParamPassSm()) {
-    plan->proxyOpCount = new std::atomic<int>(proxyOpCnt);
+    plan->syncCondition = new psmSyncCondition;
+    plan->syncCondition->proxyReadyEvent = 0;
+    plan->syncCondition->proxyOpCount= proxyOpCnt;
+    plan->syncCondition->proxyReadyEventSet = false;
   }
-
   // printPlanProxyOp(comm, plan);
 }
 
@@ -1275,8 +1277,8 @@ static ncclResult_t uploadWork(struct ncclComm* comm, struct ncclKernelPlan* pla
 
 // Add PSM related information to the proxy op.
 static void AddPSMToProxyOp(struct ncclKernelPlan* plan, struct ncclProxyOp* op) {
-  op->readyEvent = plan->proxyReadyEvent;
-  op->doneCounter = plan->proxyOpCount;
+  op->readyEvent = &plan->syncCondition->proxyReadyEvent;
+  op->doneCounter = &plan->syncCondition->proxyOpCount;
 }
 
 static ncclResult_t uploadProxyOps(struct ncclComm* comm, struct ncclKernelPlan* plan) {
@@ -1321,23 +1323,7 @@ static ncclResult_t uploadProxyOps(struct ncclComm* comm, struct ncclKernelPlan*
   return ncclSuccess;
 }
 
-// Prepare the cudaEvent fields in the plan for PSM.
-static ncclResult_t preparePlanForPSM(struct ncclComm* comm, struct ncclKernelPlan* plan) {
-  if (plan->proxyReadyEventSet) {
-    return ncclSuccess; // Already set
-  }
-  struct ncclKernelPlanner* planner = &comm->planner;
-  cudaStream_t launchStream = planner->streams->stream;
-  CUDACHECK(cudaEventCreate(&plan->proxyReadyEvent));
-  CUDACHECK(cudaEventRecord(plan->proxyReadyEvent, launchStream));
-  plan->proxyReadyEventSet = true;
-  return ncclSuccess;
-}
-
 static ncclResult_t hostStreamPlanTask(struct ncclComm* comm, struct ncclKernelPlan* plan) {
-  if (ncclParamPassSm()) {
-    NCCLCHECK(preparePlanForPSM(comm, plan));
-  }
   NCCLCHECK(ncclProfilerStartGroupEvent(plan));
   NCCLCHECK(ncclProfilerStartTaskEvents(plan));
   NCCLCHECK(uploadProxyOps(comm, plan));
@@ -1565,12 +1551,13 @@ NCCL_PARAM(MemSyncDomain, "MEM_SYNC_DOMAIN", cudaLaunchMemSyncDomainRemote);
 // Callback to synchronize with host proxy progress.
 static void CUDART_CB hostProxySyncCallback(void *args) {
   NVTX3_FUNC_RANGE_IN(nccl_domain);
-  std::atomic<int> *opCount = (std::atomic<int> *)args;
-  while (opCount->load() != 0) {
+  psmSyncCondition* syncCond = static_cast<psmSyncCondition*>(args);
+  syncCond->proxyReadyEvent.store(1, std::memory_order_release);
+  while (syncCond->proxyOpCount.load(std::memory_order_acquire) != 0) {
     // Wait for the proxy ops to be finished.
     sched_yield();
   }
-  delete opCount;
+  delete syncCond; // Free the sync condition
   return;
 }
 
@@ -1592,9 +1579,8 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
   // TODO: what if plan->kernelspecialized is true?
   if (ncclParamPassSm() &&
       plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
-    NCCLCHECKGOTO(preparePlanForPSM(comm, plan), ret, do_return);
     // Launching a cudaHostFunc() to pass sm.
-    CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->proxyOpCount), ret, do_return);
+    CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
     goto do_return;
   }
   int driverVersion;

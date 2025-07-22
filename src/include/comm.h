@@ -268,11 +268,13 @@ struct ncclKernelPlan {
   void* groupEventHandle;
 
   // Used for Pass SM only.
-  // The total number of proxyOp's that have been enqueued in this plan.
-  std::atomic<int>* proxyOpCount;
-  // Event that proxy thread queries for starting progresssing.
-  cudaEvent_t proxyReadyEvent;
-  bool proxyReadyEventSet; // true if the proxyReadyEvent has been set
+  struct psmSyncCondition* syncCondition;
+};
+
+struct psmSyncCondition {
+  std::atomic<int> proxyOpCount;    // The total number of proxyOp's that have been enqueued in this plan.
+  std::atomic<int> proxyReadyEvent; // Event that proxy thread queries for starting progresssing.
+  bool proxyReadyEventSet;           // true if the proxyReadyEvent has been set
 };
 
 ////////////////////////////////////////////////////////////////////////////////
