@@ -229,13 +229,13 @@ static ncclResult_t sendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
 
   if (proxyRank == myInfo->rank) {
     INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [send] via NET/%s/%d%s%s%s", channelId, connIndex, myInfo->rank, myInfo->nvmlDev, peerInfo->rank, peerInfo->nvmlDev, comm->ncclNet->name, req.netDev,
-        req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
-        req.shared ? "/Shared" : "");
+         req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
+         req.shared ? "/Shared" : "");
   } else {
     INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [send] via NET/%s/%d(%d)%s%s%s", channelId, connIndex, myInfo->rank, myInfo->nvmlDev, peerInfo->rank, peerInfo->nvmlDev, comm->ncclNet->name, req.netDev,
-        proxyRank,
-        req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
-        req.shared ? "/Shared" : "");
+         proxyRank,
+         req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
+         req.shared ? "/Shared" : "");
   }
   *((int*)connectInfo) = comm->topParentRanks[proxyRank];
   memcpy((uint8_t*)connectInfo + sizeof(ncclNetHandle_t), &req.useGdr, sizeof(int));
@@ -275,8 +275,8 @@ static ncclResult_t recvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgSetup, &req, sizeof(req), connectInfo, sizeof(ncclNetHandle_t)));
   memcpy((uint8_t*)connectInfo + sizeof(ncclNetHandle_t), &req.useGdr, sizeof(int));
   INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [receive] via NET/%s/%d%s%s%s", channelId, connIndex, peerInfo->rank, peerInfo->nvmlDev, myInfo->rank, myInfo->nvmlDev, comm->ncclNet->name, req.netDev,
-      req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
-      req.shared ? "/Shared" : "");
+       req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
+       req.shared ? "/Shared" : "");
   return ncclSuccess;
 }
 
@@ -301,18 +301,18 @@ static ncclResult_t netDumpMap(struct connectMap* map) {
   mem = map->mems+NCCL_NET_MAP_SHARED_DEVMEM;
   printf("Mem 3: Shared Vid mem (%x B) CPU %p GPU %p\n", mem->size, mem->cpuPtr, mem->gpuPtr);
   printf("SendMem -> Used %d Bank %d Offset %x, cpu %p gpu %p\n",
-      map->offsets.sendMem & NCCL_NET_MAP_MASK_USED ? 1 : 0,
-      NCCL_NET_MAP_OFFSET_BANK(map, sendMem), map->offsets.sendMem & NCCL_NET_MAP_MASK_OFFSET,
-      NCCL_NET_MAP_GET_POINTER(map, cpu, sendMem), NCCL_NET_MAP_GET_POINTER(map, gpu, sendMem));
+         map->offsets.sendMem & NCCL_NET_MAP_MASK_USED ? 1 : 0,
+         NCCL_NET_MAP_OFFSET_BANK(map, sendMem), map->offsets.sendMem & NCCL_NET_MAP_MASK_OFFSET,
+         NCCL_NET_MAP_GET_POINTER(map, cpu, sendMem), NCCL_NET_MAP_GET_POINTER(map, gpu, sendMem));
   printf("RecvMem -> Used %d Bank %d Offset %x, cpu %p gpu %p\n",
-      map->offsets.recvMem & NCCL_NET_MAP_MASK_USED ? 1 : 0,
-      NCCL_NET_MAP_OFFSET_BANK(map, recvMem), map->offsets.recvMem & NCCL_NET_MAP_MASK_OFFSET,
-      NCCL_NET_MAP_GET_POINTER(map, cpu, recvMem), NCCL_NET_MAP_GET_POINTER(map, gpu, recvMem));
+         map->offsets.recvMem & NCCL_NET_MAP_MASK_USED ? 1 : 0,
+         NCCL_NET_MAP_OFFSET_BANK(map, recvMem), map->offsets.recvMem & NCCL_NET_MAP_MASK_OFFSET,
+         NCCL_NET_MAP_GET_POINTER(map, cpu, recvMem), NCCL_NET_MAP_GET_POINTER(map, gpu, recvMem));
   for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) {
     printf("Proto %d -> Used %d Bank %d Offset %x, cpu %p, gpu %p\n", p,
-        map->offsets.buffs[p] & NCCL_NET_MAP_MASK_USED ? 1 : 0,
-        NCCL_NET_MAP_OFFSET_BANK(map, buffs[p]), map->offsets.buffs[p] & NCCL_NET_MAP_MASK_OFFSET,
-        NCCL_NET_MAP_GET_POINTER(map, cpu, buffs[p]), NCCL_NET_MAP_GET_POINTER(map, gpu, buffs[p]));
+           map->offsets.buffs[p] & NCCL_NET_MAP_MASK_USED ? 1 : 0,
+           NCCL_NET_MAP_OFFSET_BANK(map, buffs[p]), map->offsets.buffs[p] & NCCL_NET_MAP_MASK_OFFSET,
+           NCCL_NET_MAP_GET_POINTER(map, cpu, buffs[p]), NCCL_NET_MAP_GET_POINTER(map, gpu, buffs[p]));
   }
   printf("End of dump\n");
   return ncclSuccess;
@@ -452,7 +452,7 @@ static ncclResult_t recvConnect(struct ncclComm* comm, struct ncclConnect* conne
     // Use recv connector as unique identifier
     opId = recv;
     INFO(NCCL_PROXY, "recvConnect ncclProxyCallAsync opId=%p &recv->proxyConn=%p connectInfo=%p",
-       opId, &recv->proxyConn, connectInfo);
+         opId, &recv->proxyConn, connectInfo);
     netRecvConnectArgs args = {0};
     args.proxyRank = *((int*)connectInfo);
     NCCLCHECK(ncclProxyCallAsync(comm, &recv->proxyConn, ncclProxyMsgConnect, &args, sizeof(netRecvConnectArgs), sizeof(struct connectMap), opId));
@@ -539,10 +539,10 @@ static ncclResult_t recvFree(struct ncclConnector* recv) {
 
 #define NCCL_SHARED_STEPS 16
 static ncclResult_t sharedNetBuffersInit(struct ncclProxyState* proxyState, int cuda, int tpLocalRank, int type, int sameProcess,
-    int nChannels, char** gpuPtr, char** cpuPtr, int* size, ncclIpcDesc *ipcDesc) {
+                                         int nChannels, char** gpuPtr, char** cpuPtr, int* size, ncclIpcDesc *ipcDesc) {
   if (cuda == 0 && sameProcess == 0) {
-      WARN("PXN should not use host buffers for data");
-      return ncclInternalError;
+    WARN("PXN should not use host buffers for data");
+    return ncclInternalError;
   }
   struct ncclProxyProgressState* progressState = &proxyState->progressState;
   if (progressState->localPeers == NULL) {
@@ -788,19 +788,13 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
     int bank = resources->useGdr ? NCCL_NET_MAP_SHARED_DEVMEM : NCCL_NET_MAP_SHARED_HOSTMEM;
     struct connectMapMem* mapMem = map->mems+bank;
     NCCLCHECK(sharedNetBuffersInit(
-          proxyState, resources->useGdr, resources->tpLocalRank, 0, map->sameProcess, proxyState->p2pnChannels,
-          &mapMem->gpuPtr, &mapMem->cpuPtr, &mapMem->size, &mapMem->ipcDesc));
+                                   proxyState, resources->useGdr, resources->tpLocalRank, 0, map->sameProcess, proxyState->p2pnChannels,
+                                   &mapMem->gpuPtr, &mapMem->cpuPtr, &mapMem->size, &mapMem->ipcDesc));
     resources->buffSizes[NCCL_PROTO_SIMPLE] = mapMem->size;
 
     if (proxyState->allocP2pNetLLBuffers) {
       NCCL_NET_MAP_ADD_POINTER(map, 0, 0 /*p == NCCL_PROTO_LL*/, proxyState->buffSizes[NCCL_PROTO_LL], buffs[NCCL_PROTO_LL]);
       resources->buffSizes[NCCL_PROTO_LL] = proxyState->buffSizes[NCCL_PROTO_LL];
-    }
-
-    if (resources->useGdr) {
-      printf("We use Gdr!");
-    } else {
-      printf("We did not use Gdr!");
     }
     NCCL_NET_MAP_ADD_POINTER(map, 1, resources->useGdr ? 1 : 0, mapMem->size, buffs[NCCL_PROTO_SIMPLE]);
   }
@@ -955,8 +949,8 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
     int bank = resources->useGdr ? NCCL_NET_MAP_SHARED_DEVMEM : NCCL_NET_MAP_SHARED_HOSTMEM;
     struct connectMapMem* mapMem = map->mems+bank;
     NCCLCHECK(sharedNetBuffersInit(
-          proxyState, resources->useGdr, resources->tpLocalRank, 1, 1, proxyState->p2pnChannels,
-          &mapMem->gpuPtr, &mapMem->cpuPtr, &mapMem->size, NULL));
+                                   proxyState, resources->useGdr, resources->tpLocalRank, 1, 1, proxyState->p2pnChannels,
+                                   &mapMem->gpuPtr, &mapMem->cpuPtr, &mapMem->size, NULL));
     resources->buffSizes[NCCL_PROTO_SIMPLE] = mapMem->size;
     NCCL_NET_MAP_ADD_POINTER(map, 1, resources->useGdr ? 1 : 0, mapMem->size, buffs[NCCL_PROTO_SIMPLE]);
   }
@@ -1012,9 +1006,9 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
         (void)close(dmabuf_fd);
       } else // FALL-THROUGH to nv_peermem GDR path
 #endif
-      {
-        NCCLCHECK(proxyState->ncclNet->regMr(resources->netRecvComm, resources->buffers[p], resources->buffSizes[p], NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST, &resources->mhandles[p]));
-      }
+        {
+          NCCLCHECK(proxyState->ncclNet->regMr(resources->netRecvComm, resources->buffers[p], resources->buffSizes[p], NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST, &resources->mhandles[p]));
+        }
 
       // Copy the mhandle dptr
       if (resources->netDeviceType != NCCL_NET_DEVICE_HOST && proxyState->ncclNet->getDeviceMr)
@@ -1133,7 +1127,7 @@ static ncclResult_t recvProxyFree(struct ncclProxyConnection* connection, struct
 static_assert(NCCL_STEPS <= NCCL_NET_MAX_REQUESTS, "Not enough net requests to cover for steps");
 
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if (cudaEventQuery(args->readyEvent) != cudaSuccess) return ncclSuccess;
+  if(!(args->readyEvent->load(std::memory_order_acquire))) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
@@ -1151,14 +1145,13 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
   }
   args->idle = 1;
   if (args->state == ncclProxyOpProgress) {
-    // printf("\033[34m Begin sendProxyProgress. \033[0m \n");
     int p = args->protocol;
     int maxDepth = std::min(NCCL_STEPS, NCCL_SHARED_STEPS/args->nsubs);
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
       int postedStepId = sub->posted;
-      int transmittedStepId = sub->transmitted;
-      int doneStepId = sub->done;
+      // int transmittedStepId = sub->transmitted;
+      // int doneStepId = sub->done;
       if (sub->done == sub->nsteps) continue;
       struct sendNetResources* resources = (struct sendNetResources*) (sub->connection->transportResources);
       volatile struct ncclConnFifo* connFifo = (volatile struct ncclConnFifo*)resources->recvMem->connFifo;
@@ -1171,7 +1164,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         ncclProfilerStartSendProxyStepEvent(s, args, postedStepId);
         int buffSlot = (sub->base+sub->posted)%NCCL_STEPS;
         bool shared = (p == NCCL_PROTO_SIMPLE) && resources->shared;
-	size_t size;
+        size_t size=0;
 
         if (resources->shared && !sub->reg) {
           int sharedBuffSlot = sub->posted%maxDepth;
@@ -1181,62 +1174,37 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
           __sync_synchronize();
         }
 
-        // 计算源地址和实际数据大小
         size_t srcOffset = sub->posted * size;
         size_t remainingBytes = sub->nbytes - srcOffset;
 
         int actualSize = std::min((size_t)size, remainingBytes);
-	// size_t srcOffset = actualSize;
-	// printf("\033[31m size is %ld. \033[0m \n", size);
-	// printf("\033[31m stepSize is %d, sliceSteps is %d. \033[0m \n", stepSize, args->sliceSteps);
-
         char* srcAddr = (char*)sub->sendbuff + srcOffset;
-        char* dstAddr = shared ? localBuff+connFifo[buffSlot].offset : localBuff+buffSlot*stepSize;;
+        char* dstAddr = shared ? localBuff+connFifo[buffSlot].offset : localBuff+buffSlot*stepSize;
 
-        // 处理不同的缓冲区模式
         if (resources->shared) {
           // no need for D2D copy in registered memory mode
           dstAddr = sub->reg ? NULL : localBuff + resources->recvMem->connFifo[buffSlot].offset;
         }
 
-        // 执行D2D拷贝（如果需要）
         if (connFifo[buffSlot].size == -1) {
-	  // printf("\033[31m connfifo size is -1 \033[0m \n");
           if (dstAddr != NULL) {
-            
-	    // printf("\033[31m sub->posted is %d, secOffset is %ld, ready to copy %d in sendProxyProgress, src: %p, dst: %p. \033[0m \n", sub->posted, srcOffset, actualSize, srcAddr, dstAddr);
-	    cudaPointerAttributes srcAttr, dstAttr;
-   	    cudaError_t srcErr = cudaPointerGetAttributes(&srcAttr, srcAddr);	
-	    cudaError_t dstErr = cudaPointerGetAttributes(&dstAttr, dstAddr);
-
-   	    if (srcErr != cudaSuccess) {
-    		// printf("Source pointer is not a valid CUDA pointer\n");
-	    }
-	    if (dstErr != cudaSuccess) {
-    		// printf("Destination pointer is not a valid CUDA pointer\n");
-	    }
-
-	    // 检查内存类型
-	    if (srcAttr.type != cudaMemoryTypeDevice) {
-    		printf("Source is not device memory\n");
-	    }
-	    if (dstAttr.type != cudaMemoryTypeDevice) {
-    		printf("Destination is not device memory\n");
-	    }
-            CUDACHECK(cudaMemcpyAsync(dstAddr, srcAddr, actualSize,
-                                      cudaMemcpyDeviceToDevice, resources->stream));
+            cudaPointerAttributes srcAttr, dstAttr;
+            cudaPointerGetAttributes(&srcAttr, srcAddr);
+            cudaPointerGetAttributes(&dstAttr, dstAddr);
+            if (srcAttr.type != cudaMemoryTypeDevice) {
+              printf("Source is not device memory\n");
+            }
+            if (dstAttr.type != cudaMemoryTypeDevice) {
+              printf("Destination is not device memory\n");
+            }
+            CUDACHECK(cudaMemcpyAsync(dstAddr, srcAddr, actualSize, cudaMemcpyDeviceToDevice, resources->stream));
             CUDACHECK(cudaEventRecord(copyEvents[buffSlot], resources->stream));
           }
-          // 设置connFifo的size（为了兼容性和调试）
           connFifo[buffSlot].size = actualSize;
-          
-          // 推进posted计数
           sub->posted += args->sliceSteps;
-
           args->idle = 0;
           continue;
         }
-        // 如果connFifo[buffSlot].size != -1，表示该缓冲区已被使用，并且还未完成网络发送，继续向下执行逻辑
       }
 
       // Check whether we completed some cudaMemcpyAsync operations.
@@ -1247,10 +1215,8 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         char* buff = shared ? localBuff+connFifo[buffSlot].offset : localBuff+buffSlot*stepSize;
         int ready = 0;
 
-        // 目前无核实现仅限simple协议 
         assert(p == NCCL_PROTO_SIMPLE);
 
-        // 复用原生net实现
         if (resources->shared) {
           buff = sub->reg ? (char*)sub->sendbuff + sub->transmitted * NCCL_MAX_NET_SIZE : localBuff + resources->recvMem->connFifo[buffSlot].offset;
         } else if (sub->reg) {
@@ -1262,15 +1228,13 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         if (sub->reg) {
           ready = 1;
         } else if (cudaEventQuery(copyEvents[buffSlot]) == cudaSuccess) {
-          // printf("\033[36m Send copy finished! \033[0m \n"); 
-	  ready = 1;
+          ready = 1;
         }
 
         if (ready) {
-          // 发送数据到网络
           NCCLCHECK(proxyState->ncclNet->isend(resources->netSendComm, buff, size,
-                                                resources->tpRank, sub->sendMhandle,
-                                                sub, sub->requests + buffSlot));
+                                               resources->tpRank, sub->sendMhandle,
+                                               sub, sub->requests + buffSlot));
 
           if (sub->requests[buffSlot] != NULL) {
             TRACE(NCCL_NET, "sendProxyNoKernel [%ld/%d/%d] Isend posted, req %p, buff %p, size %d",
@@ -1293,7 +1257,6 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         NCCLCHECK(proxyState->ncclNet->test(sub->requests[buffSlot], &done, &size));
 
         if (done) {
-          // 重置size表示槽位可用
           connFifo[buffSlot].size = -1;
           __sync_synchronize();
 
@@ -1301,10 +1264,8 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
                 sub->done, buffSlot, sub->nsteps, sub->requests[buffSlot]);
 
           sub->done += args->sliceSteps;
-
           args->idle = 0;
 
-          // 检查是否全部完成
           if (sub->done == sub->nsteps) {
             args->done++;
             if (sub->ringAlgo && sub->ringAlgo->decRefCount() == 0) {
@@ -1327,6 +1288,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
 }
 
 static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
+  if(!(args->readyEvent->load(std::memory_order_acquire))) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
     // Initialize subs and group them by same recvComm.
     void* recvComm;
@@ -1370,7 +1332,6 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
   }
   args->idle = 1;
   if (args->state == ncclProxyOpProgress) {
-    // printf("\033[34m Begin recvProxyProgress. \033[0m \n");
     int p = args->protocol;
     int maxDepth = std::min(NCCL_STEPS, NCCL_SHARED_STEPS/args->nsubs);
     for (int s=0; s<args->nsubs; s+=args->subs[s].groupSize) {
@@ -1401,12 +1362,10 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
                 ptrs[subCount] = sub->recvbuff + sub->posted * NCCL_MAX_NET_SIZE;
                 sizes[subCount] = std::min(NCCL_MAX_NET_SIZE, (ssize_t)(sub->nbytes - sub->posted * NCCL_MAX_NET_SIZE));
               } else {
-		// printf("\033[31m reg: false; shared: true; \033[0m \n");
                 int sharedBuffSlot = sub->posted % maxDepth;
                 int offset;
                 NCCLCHECK(sharedBuffersGet(proxyState, sub->channelId, sharedBuffSlot * args->nsubs + s + i, &offset, sizes + subCount));
-                // printf("\033[31m sizes[subCount] is %ld \033[0m \n", sizes[subCount]);
-		connFifo[buffSlot].offset = offset;
+                connFifo[buffSlot].offset = offset;
                 ptrs[subCount] = localBuff + offset;
               }
             } else {
@@ -1546,36 +1505,26 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
             ncclProfilerRecordProxyOpEventState(s+i, args, sub->transmitted, sub->transSize, ncclProfilerProxyOpRecvTransmitted);
             ncclProfilerRecordProxyStepEventState(s+i, args, transmittedStepId, ncclProfilerProxyStepRecvGPUWait);
             if (step < sub->nsteps) {
-              // 计算源地址
               char* srcPtr;
               char* dstPtr;
-
               char* localBuff = NCCL_NET_MAP_GET_POINTER(&resources->map, cpu, buffs[p]);
               int  buffSlot = (sub->base + sub->transmitted) % NCCL_STEPS;
-              
-              /* === 找到 staging buffer 源地址，与阶段 2 完全等价 === */
               if (resources->shared) {
                 srcPtr = sub->reg ? NULL : localBuff + resources->recvMem->connFifo[buffSlot].offset;
               } else {
                 srcPtr = sub->reg ? NULL : localBuff + buffSlot * stepSize;
               }
 
-
-              // 计算源地址和实际数据大小
-	      size_t size = proxyState->p2pChunkSize;
+              size_t size = proxyState->p2pChunkSize;
               size_t dstOffset = sub->transmitted * size;
               size_t remainingBytes = sub->nbytes - dstOffset;
               int actualSize = std::min((size_t)(size), remainingBytes);
-
               dstPtr = (char*)sub->recvbuff + dstOffset;
-	      
+
               if (srcPtr != NULL && (cudaEventQuery(resources->events[buffSlot]) == cudaSuccess)) {
-                // printf("\033[31m ready to copy %d in recvProxyProgress. \033[0m \n", actualSize);
-		CUDACHECK(cudaMemcpyAsync(dstPtr, srcPtr, actualSize, cudaMemcpyDeviceToDevice, resources->stream));
+                CUDACHECK(cudaMemcpyAsync(dstPtr, srcPtr, actualSize, cudaMemcpyDeviceToDevice, resources->stream));
                 CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
               }
-              
-              
               sub->transmitted += args->sliceSteps;
               __sync_synchronize();
               if (resources->gdcSync) wc_store_fence(); // Flush out WC write
@@ -1598,8 +1547,8 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
           int  buffSlot = (sub->base + sub->done) % NCCL_STEPS;
 
           while ((cudaEventQuery(resources->events[buffSlot]) == cudaSuccess) &&
-              // LL and LL128 can acknowledge 0-bytes send before they even happen. Don't go past what we transmitted.
-              sub->transmitted > sub->done) {
+                 // LL and LL128 can acknowledge 0-bytes send before they even happen. Don't go past what we transmitted.
+                 sub->transmitted > sub->done) {
             if (subGroup->recvRequestsCache[sub->done%NCCL_STEPS]) {
               // the multirecv requests are only cached in the first sub.
               if (proxyState->ncclNet->irecvConsumed)
