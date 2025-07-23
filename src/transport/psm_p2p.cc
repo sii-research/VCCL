@@ -406,7 +406,7 @@ ncclResult_t psmP2pSendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph,
     info->rank = intermediateRank;
     INFO(NCCL_INIT|NCCL_P2P, "Channel %02d/%01d : %d[%d] -> %d[%d] via PSM_P2P/indirect/%d[%d]%s",
         channelId, connIndex, myInfo->rank, myInfo->nvmlDev, peerInfo->rank, peerInfo->nvmlDev, intermediateRank,
-	  comm->peerInfo[intermediateRank].nvmlDev, useReadStr);
+        comm->peerInfo[intermediateRank].nvmlDev, useReadStr);
   }
 
   memset(&req, '\0', sizeof(req));
@@ -719,7 +719,7 @@ static ncclResult_t psmP2pSendProxyConnect(struct ncclProxyConnection* connectio
 
 static ncclResult_t psmP2pRecvProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
   struct p2pShmProxyInfo* proxyInfo = (struct p2pShmProxyInfo*)connection->transportResources;
-  // CUDACHECK(cudaStreamCreateWithFlags(&proxyInfo->stream, cudaStreamNonBlocking));
+  CUDACHECK(cudaStreamCreateWithFlags(&proxyInfo->stream, cudaStreamNonBlocking));
   for (int i=0; i<PSM_STEPS; i++) {
     CUDACHECK(cudaEventCreate(proxyInfo->events+i));
   }
@@ -791,7 +791,7 @@ static ncclResult_t psmP2pRecvProxyFree(struct ncclProxyConnection* connection, 
 }
 
 static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(cudaEventQuery(args->readyEvent) != cudaSuccess) return ncclSuccess;
+  if(!(args->readyEvent->load(std::memory_order_acquire))) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
@@ -863,7 +863,7 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
 }
 
 static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(cudaEventQuery(args->readyEvent) != cudaSuccess) return ncclSuccess;
+  if(!(args->readyEvent->load(std::memory_order_acquire))) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
@@ -900,7 +900,7 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
               (char*)sub->recvbuff + sub->offset,
               resources->recvFifo + buffSlot * sub->chunkSize,
               size,
-              cudaMemcpyDeviceToDevice, 
+              cudaMemcpyDeviceToDevice,
               resources->stream));
           CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
           sub->transmitted += args->sliceSteps;
