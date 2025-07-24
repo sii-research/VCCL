@@ -798,8 +798,9 @@ static ncclResult_t ncclTopoGetNchannels(struct ncclComm* comm, int g /*local gp
 
 NCCL_PARAM(MinP2pNChannels, "MIN_P2P_NCHANNELS", 1);
 NCCL_PARAM(MaxP2pNChannels, "MAX_P2P_NCHANNELS", MAXCHANNELS);
+NCCL_PARAM(PsmP2pNChannels, "PSM_P2P_NCHANNELS", 2);
 extern int64_t ncclParamWorkArgsBytes();
-
+extern int64_t ncclParamPassSm();
 ncclResult_t ncclTopoComputeP2pChannels(struct ncclComm* comm) {
   /* here we already honor comm->max/minCTAs for p2pnChannels. */
   if (comm->sharedRes->owner != comm) {
@@ -809,6 +810,7 @@ ncclResult_t ncclTopoComputeP2pChannels(struct ncclComm* comm) {
     comm->p2pnChannels = std::min(comm->nChannels, (int)ncclParamMaxP2pNChannels());
     comm->p2pnChannels = std::max(comm->p2pnChannels, (int)ncclParamMinP2pNChannels());
   }
+  if (ncclParamPassSm()) comm->p2pnChannels = std::min(comm->p2pnChannels, (int)ncclParamPsmP2pNChannels());
 
   int minChannels = comm->p2pnChannels;
   // We need to loop through all local GPUs to have a global picture

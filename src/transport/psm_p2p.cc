@@ -14,8 +14,10 @@
 #include <assert.h>
 #include <cstddef>
 #include "shm.h"
-#define PSM_BUFFER_SIZE (64 * 1024 * 1024) // 64MB
-#define PSM_STEPS 8
+NCCL_PARAM(PsmBufferSize, "PSM_BUFFER_SIZE", 64 * 1024 * 1024);
+static inline size_t getPsmBufferSize() {return (size_t)ncclParamPsmBufferSize();}
+#define PSM_BUFFER_SIZE getPsmBufferSize()
+#define PSM_STEPS 1
 enum p2pType { P2P_DIRECT, P2P_INTERMEDIATE, P2P_IPC, P2P_CUMEM };
 
 struct ncclP2pBuff {
@@ -790,6 +792,25 @@ static ncclResult_t psmP2pRecvProxyFree(struct ncclProxyConnection* connection, 
   return ncclSuccess;
 }
 
+static void computeChunksize(struct ncclProxySubArgs* sub) {
+  size_t dynamic_buffer = PSM_BUFFER_SIZE;
+  if (sub->nbytes >= PSM_BUFFER_SIZE) {
+    dynamic_buffer = PSM_BUFFER_SIZE;
+  } else {
+    size_t msize = sub->nbytes / (1024 * 1024);
+    int adjustFactor;
+    if (msize >= 32) adjustFactor = 1;
+    else if (msize >= 16) adjustFactor = 2;
+    else if (msize >= 8) adjustFactor = 4;
+    else if (msize >= 4) adjustFactor = 8;
+    else if (msize >= 2) adjustFactor = 16;
+    else if (msize >= 1) adjustFactor = 32;
+    else adjustFactor = 64;
+    dynamic_buffer = PSM_BUFFER_SIZE / adjustFactor;
+  }
+  sub->chunkSize = dynamic_buffer / PSM_STEPS;
+}
+
 static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   if(!(args->readyEvent->load(std::memory_order_acquire))) return ncclSuccess;
   if (args->state == ncclProxyOpReady) {
@@ -800,8 +821,7 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
       sub->base = ROUNDUP(resources->step, args->chunkSteps);
       sub->posted = sub->transmitted = sub->done = 0;
       // psm specific initilization
-      int p = args->protocol;
-      sub->chunkSize = proxyState->buffSizes[p] / PSM_STEPS;
+      computeChunksize(sub);
       sub->nsteps=(sub->nbytes + sub->chunkSize - 1) / sub->chunkSize;
       resources->shm->sendMem.head = sub->base;
       sub->offset = 0;
@@ -872,8 +892,7 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
       sub->base = ROUNDUP(resources->step, args->chunkSteps);
       sub->posted = sub->transmitted = sub->done = 0;
       resources->shm->recvMem.tail = sub->base + PSM_STEPS;
-      int p = args->protocol;
-      sub->chunkSize = proxyState->buffSizes[p] / PSM_STEPS;
+      computeChunksize(sub);
       sub->nsteps=(sub->nbytes + sub->chunkSize - 1) / sub->chunkSize;
       sub->offset = 0;
     }
