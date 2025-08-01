@@ -807,7 +807,7 @@ static ncclResult_t addP2pToPlan(
                                          : &channelPeers[peerRank]->recv[connIndex];
         protoLL[dir] &= conn->conn.buffs[NCCL_PROTO_LL] != nullptr;
         if (ncclParamPassSm()) {
-          network[dir] |= conn->transportComm == (dir ? &psmNetTransport.recv : &psmNetTransport.send);
+          network[dir] |= conn->transportComm == (dir ? &psmNetTransport.send : &psmNetTransport.recv);
         } else {
           network[dir] |= conn->transportComm == (dir ? &netTransport.send : &netTransport.recv);
         }
