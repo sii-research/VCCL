@@ -19,6 +19,7 @@
 #include <cassert>
 
 NCCL_PARAM(L1SharedMemoryCarveout, "L1_SHARED_MEMORY_CARVEOUT", 0);
+const int nccl_fault_tolerance_enable = ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE") ? atoi(ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE")) : 1;
 
 // Returns maximum kernel stack size of all CUDA kernels
 ncclResult_t ncclInitKernelsForDevice(int cudaArch, int maxSharedMem, size_t* maxStackSize) {
@@ -2379,39 +2380,41 @@ ncclResult_t ncclEnqueueCheck(struct ncclInfo* info) {
   TRACE_CALL("nccl%s(%" PRIx64 ",%" PRIx64 ",%zu,%d,%d,%d,%p,%p)", info->opName, reinterpret_cast<int64_t>(info->sendbuff), reinterpret_cast<int64_t>(info->recvbuff), info->count, info->datatype, info->op, info->root, info->comm, info->stream);
 
   // set the comm dev type to original dev instead of backup dev
-  for (int i = 1; i < info->comm->nRanks && i <= 128; i++) {
-    int recvPeer = (info->comm->rank - i + info->comm->nRanks) % info->comm->nRanks;
+  if (nccl_fault_tolerance_enable) {
+    for (int i = 1; i < info->comm->nRanks && i <= 128; i++) {
+      int recvPeer = (info->comm->rank - i + info->comm->nRanks) % info->comm->nRanks;
 
-    for (int c = 0; c < MAXCHANNELS; c++) {
-      // in the receiver, try to transition to normal qp. In sender, use the message in ncclIbPostFifo to choose the qp.
-      for (int connIndex = 0; connIndex < NCCL_MAX_CONNS; connIndex++) {
-        // if nccl api is send, break
-        if (connIndex == 0 && info->coll == ncclFuncSend) break;
+      for (int c = 0; c < MAXCHANNELS; c++) {
+        // in the receiver, try to transition to normal qp. In sender, use the message in ncclIbPostFifo to choose the qp.
+        for (int connIndex = 0; connIndex < NCCL_MAX_CONNS; connIndex++) {
+          // if nccl api is send, break
+          if (connIndex == 0 && info->coll == ncclFuncSend) break;
 
-        if (info->comm->channels[c].peers == NULL ||
-            info->comm->channels[c].peers[recvPeer] == NULL) {
-          continue;
-        }
-        struct ncclConnector *conn = info->comm->channels[c].peers[recvPeer]->recv + connIndex;
-        if (conn != NULL &&
-            (conn->noUsePxnTransport) &&
-            (conn->connected)) {
-          bool if_fill = false;
-          NCCLCHECK(ncclIbCheckConnector(conn, if_fill));
-          if (if_fill) {
-            bool needCudaSync = false;
-            if (!ifCudaSync) {
-              NCCLCHECK(ncclIbCheckIfNeedSync(conn->proxyConn.connection->transportResources, false, needCudaSync));
-              if (needCudaSync) {
-                CUDACHECK(cudaStreamSynchronize(info->stream));
-                ifCudaSync = true;
+          if (info->comm->channels[c].peers == NULL ||
+              info->comm->channels[c].peers[recvPeer] == NULL) {
+            continue;
+          }
+          struct ncclConnector *conn = info->comm->channels[c].peers[recvPeer]->recv + connIndex;
+          if (conn != NULL &&
+              (conn->noUsePxnTransport) &&
+              (conn->connected)) {
+            bool if_fill = false;
+            NCCLCHECK(ncclIbCheckConnector(conn, if_fill));
+            if (if_fill) {
+              bool needCudaSync = false;
+              if (!ifCudaSync) {
+                NCCLCHECK(ncclIbCheckIfNeedSync(conn->proxyConn.connection->transportResources, false, needCudaSync));
+                if (needCudaSync) {
+                  CUDACHECK(cudaStreamSynchronize(info->stream));
+                  ifCudaSync = true;
+                }
               }
-            }
-            if (info->coll == ncclFuncRecv) {
-              NCCLCHECK(ncclIbRefreshState(conn->proxyConn.connection->transportResources, false, true));
-            }
-            else {
-              NCCLCHECK(ncclIbRefreshState(conn->proxyConn.connection->transportResources, false, false));
+              if (info->coll == ncclFuncRecv) {
+                NCCLCHECK(ncclIbRefreshState(conn->proxyConn.connection->transportResources, false, true));
+              }
+              else {
+                NCCLCHECK(ncclIbRefreshState(conn->proxyConn.connection->transportResources, false, false));
+              }
             }
           }
         }

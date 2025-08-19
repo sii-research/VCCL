@@ -33,6 +33,8 @@ static char ncclIbIfName[MAX_IF_NAME_SIZE+1];
 static union ncclSocketAddress ncclIbIfAddr;
 
 const long long second_to_nanoseconds = 1000000000;
+// If enable, Vccl will try to retransmit data using different RNICs when occuring errors, default is 1.
+const int nccl_fault_tolerance_enable = ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE") ? atoi(ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE")) : 1;
 
 long long get_nanoseconds()
 {
@@ -161,22 +163,22 @@ static void* ncclIbAsyncThreadMain(void* args) {
     case IBV_EVENT_DEVICE_FATAL:
       // the above is device fatal error
       WARN("NET/IB : %s:%d async fatal event: %s", dev->devName, dev->portNum, str);
-      // Goto Fault tolerance
-      // ncclIbDevFatalError(dev);
+      // Goto Fault tolerance if enable
+      if (!nccl_fault_tolerance_enable) ncclIbDevFatalError(dev);
       break;
     case IBV_EVENT_CQ_ERR:
       // the above is a CQ fatal error
       WARN("NET/IB : %s:%d async fatal event on CQ (%p): %s", dev->devName, dev->portNum, cq, str);
-      // Goto Fault tolerance
-      // ncclIbCqFatalError(cq);
+      // Goto Fault tolerance if enable
+      if (!nccl_fault_tolerance_enable) ncclIbCqFatalError(cq);
       break;
     case IBV_EVENT_QP_FATAL:
     case IBV_EVENT_QP_REQ_ERR:
     case IBV_EVENT_QP_ACCESS_ERR:
       // the above are QP fatal errors
       WARN("NET/IB : %s:%d async fatal event on QP (%p): %s", dev->devName, dev->portNum, qp, str);
-      // Goto Fault tolerance
-      // ncclIbQpFatalError(qp);
+      // Goto Fault tolerance if enable
+      if (!nccl_fault_tolerance_enable) ncclIbQpFatalError(qp);
       break;
     case IBV_EVENT_SRQ_ERR:
       // SRQ are not used in NCCL
@@ -995,7 +997,7 @@ struct ncclIbSendFifo {
 // fifo for synchronizing when changing to backup
 struct alignas(32) ncclIbSyncFifo{
   uint64_t recvFifoTail;    // get send fifo head, and roll back fifoTail to fifoHead
-  uint64_t restartPos;  // update recv sub->posted because recv sub->received may be greater than send sub->done
+  uint64_t restartPos;  // Sender sub->transmitted maybe incorrect due to the ack from Receiver is lost
   uint64_t idx;
   int errPortIdx;
 };
@@ -1394,16 +1396,18 @@ ib_recv_dev_list:
 
   // Init PD, Ctx for each IB device
   comm->ar = 1; // Set to 1 for logic
-  comm->backupAr = 1; // Set to 1 for logic
+  if (nccl_fault_tolerance_enable) comm->backupAr = 1; // Set to 1 for logic
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
     int ibDevN = comm->base.vProps.devs[i];
     NCCLCHECKGOTO(ncclIbInitCommDevBase(ibDevN, &comm->devs[i].base, &comm->base.stats, false), ret, fail);
     comm->ar = comm->ar && ncclIbDevs[ibDevN].ar; // ADAPTIVE_ROUTING - if all merged devs have it enabled
 
     //backup dev
-    int backupIbDevN = comm->base.backupVProps.devs[i];
-    NCCLCHECKGOTO(ncclIbInitCommDevBase(backupIbDevN, &comm->backupDevs[i].base, &comm->base.backupStats, true), ret, fail);
-    comm->backupAr = comm->backupAr && ncclIbDevs[backupIbDevN].ar; // ADAPTIVE_ROUTING - if all merged devs have it enabled
+    if (nccl_fault_tolerance_enable) {
+      int backupIbDevN = comm->base.backupVProps.devs[i];
+      NCCLCHECKGOTO(ncclIbInitCommDevBase(backupIbDevN, &comm->backupDevs[i].base, &comm->base.backupStats, true), ret, fail);
+      comm->backupAr = comm->backupAr && ncclIbDevs[backupIbDevN].ar; // ADAPTIVE_ROUTING - if all merged devs have it enabled
+    }
   }
 
   memset(&meta, 0, sizeof(meta));
@@ -1424,30 +1428,36 @@ ib_recv_dev_list:
     meta.qpInfo[q].devIndex = comm->base.qps[q].devIndex;
 
     // backup QP
-    ncclIbSendCommDev *backupCommDev = comm->backupDevs + backupDevIndex;
-    ncclIbDev *backupIbDev = ncclIbDevs + backupCommDev->base.ibDevN;
-    NCCLCHECK(ncclIbCreateQp(backupIbDev->portNum, &backupCommDev->base, IBV_ACCESS_REMOTE_WRITE, &comm->base.backupStats, comm->base.backupQps + q, true));
-    comm->base.backupQps[q].devIndex = backupDevIndex;
-    meta.backupQpInfo[q].qpn = comm->base.backupQps[q].qp->qp_num;
-    meta.backupQpInfo[q].devIndex = comm->base.backupQps[q].devIndex;
+    if (nccl_fault_tolerance_enable) {
+      ncclIbSendCommDev *backupCommDev = comm->backupDevs + backupDevIndex;
+      ncclIbDev *backupIbDev = ncclIbDevs + backupCommDev->base.ibDevN;
+      NCCLCHECK(ncclIbCreateQp(backupIbDev->portNum, &backupCommDev->base, IBV_ACCESS_REMOTE_WRITE, &comm->base.backupStats, comm->base.backupQps + q, true));
+      comm->base.backupQps[q].devIndex = backupDevIndex;
+      meta.backupQpInfo[q].qpn = comm->base.backupQps[q].qp->qp_num;
+      meta.backupQpInfo[q].devIndex = comm->base.backupQps[q].devIndex;
+    }
 
     if (ncclParamIbEceEnable()) {
       // Query ece capabilities (enhanced connection establishment)
       NCCLCHECKGOTO(wrap_ibv_query_ece(comm->base.qps[q].qp, &meta.qpInfo[q].ece, &meta.qpInfo[q].ece_supported), ret, fail);
-      NCCLCHECKGOTO(wrap_ibv_query_ece(comm->base.backupQps[q].qp, &meta.backupQpInfo[q].ece, &meta.backupQpInfo[q].ece_supported), ret, fail);
+      if (nccl_fault_tolerance_enable) NCCLCHECKGOTO(wrap_ibv_query_ece(comm->base.backupQps[q].qp, &meta.backupQpInfo[q].ece, &meta.backupQpInfo[q].ece_supported), ret, fail);
     } else {
       meta.qpInfo[q].ece_supported = 0;
     }
     devIndex = (devIndex + 1) % comm->base.vProps.ndevs;
-    backupDevIndex = (backupDevIndex + 1) % comm->base.backupVProps.ndevs;
+    if (nccl_fault_tolerance_enable) backupDevIndex = (backupDevIndex + 1) % comm->base.backupVProps.ndevs;
   }
 
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
     ncclIbSendCommDev* commDev = comm->devs + i;
     ncclIbDev* ibDev = ncclIbDevs + commDev->base.ibDevN;
 
-    ncclIbSendCommDev *backupCommDev = comm->backupDevs + i;
-    ncclIbDev *backupIbDev = ncclIbDevs + backupCommDev->base.ibDevN;
+    ncclIbSendCommDev *backupCommDev = NULL;
+    ncclIbDev *backupIbDev = NULL;
+    if (nccl_fault_tolerance_enable) {
+      backupCommDev = comm->backupDevs + i;
+      backupIbDev = ncclIbDevs + backupCommDev->base.ibDevN;
+    }
 
     // Write to the metadata struct via this pointer
     ncclIbDevInfo* devInfo = meta.devs + i;
@@ -1456,26 +1466,31 @@ ib_recv_dev_list:
     devInfo->lid           = ibDev->portAttr.lid;
 
     // Write backup info to the metadata struct via this pointer
-    ncclIbDevInfo* backupDevInfo = meta.backupDevs + i;
-    backupDevInfo->ib_port       = backupIbDev->portNum;
-    backupDevInfo->mtu           = backupIbDev->portAttr.active_mtu;
-    backupDevInfo->lid           = backupIbDev->portAttr.lid;
+    ncclIbDevInfo *backupDevInfo = NULL;
+    if (nccl_fault_tolerance_enable) {
+      backupDevInfo = meta.backupDevs + i;
+      backupDevInfo->ib_port = backupIbDev->portNum;
+      backupDevInfo->mtu = backupIbDev->portAttr.active_mtu;
+      backupDevInfo->lid = backupIbDev->portAttr.lid;
+    } 
 
     // Prepare my fifo
     NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->fifo, sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
     devInfo->fifoRkey = commDev->fifoMr->rkey;
 
-    // Prepare backup fifo
-    NCCLCHECKGOTO(wrap_ibv_reg_mr(&backupCommDev->fifoMr, backupCommDev->base.pd, comm->fifo, sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
-    backupDevInfo->fifoRkey = backupCommDev->fifoMr->rkey;
+    if (nccl_fault_tolerance_enable) {
+      // Prepare backup fifo
+      NCCLCHECKGOTO(wrap_ibv_reg_mr(&backupCommDev->fifoMr, backupCommDev->base.pd, comm->fifo, sizeof(struct ncclIbSendFifo) * MAX_REQUESTS * NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ), ret, fail);
+      backupDevInfo->fifoRkey = backupCommDev->fifoMr->rkey;
 
-    // Prepare syncFifo
-    NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->syncFifoMr, commDev->base.pd, comm->syncFifo, sizeof(struct ncclIbSyncFifo)*MAX_REQUESTS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
-    devInfo->syncFifoRkey = commDev->syncFifoMr->rkey;
+      // Prepare syncFifo
+      NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->syncFifoMr, commDev->base.pd, comm->syncFifo, sizeof(struct ncclIbSyncFifo) * MAX_REQUESTS, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ), ret, fail);
+      devInfo->syncFifoRkey = commDev->syncFifoMr->rkey;
 
-    // Prepare backup syncFifo
-    NCCLCHECKGOTO(wrap_ibv_reg_mr(&backupCommDev->syncFifoMr, backupCommDev->base.pd, comm->syncFifo, sizeof(struct ncclIbSyncFifo)*MAX_REQUESTS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
-    backupDevInfo->syncFifoRkey = backupCommDev->syncFifoMr->rkey;
+      // Prepare backup syncFifo
+      NCCLCHECKGOTO(wrap_ibv_reg_mr(&backupCommDev->syncFifoMr, backupCommDev->base.pd, comm->syncFifo, sizeof(struct ncclIbSyncFifo) * MAX_REQUESTS, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ), ret, fail);
+      backupDevInfo->syncFifoRkey = backupCommDev->syncFifoMr->rkey;
+    }
 
     // Pack local GID info
     devInfo->link_layer = commDev->base.gidInfo.link_layer = ibDev->portAttr.link_layer;
@@ -1505,31 +1520,33 @@ ib_recv_dev_list:
       }
     }
 
-    // backup Pack local GID info
-    backupDevInfo->link_layer = backupCommDev->base.gidInfo.link_layer = backupIbDev->portAttr.link_layer;
-    NCCLCHECKGOTO(ncclIbGetGidIndex(backupIbDev->context, backupIbDev->portNum, &backupIbDev->portAttr, &backupCommDev->base.gidInfo.localGidIndex), ret, fail);
-    NCCLCHECKGOTO(wrap_ibv_query_gid(backupIbDev->context, backupIbDev->portNum, backupCommDev->base.gidInfo.localGidIndex, &backupCommDev->base.gidInfo.localGid), ret, fail);
-    backupDevInfo->gid.global.subnet_prefix = backupCommDev->base.gidInfo.localGid.global.subnet_prefix;
-    backupDevInfo->gid.global.interface_id = backupCommDev->base.gidInfo.localGid.global.interface_id;
-    // backup info logging
-    if (backupDevInfo->link_layer == IBV_LINK_LAYER_INFINIBAND) { // IB
-      for (int q = 0; q < comm->base.nqps; q++) {
-        // Print just the QPs for this dev
-        if (comm->base.backupQps[q].devIndex == i)
-          INFO(NCCL_NET,"NET/IB: %s %d IbDev %d Port %d qpn %d mtu %d LID %d subnet-prefix %lu  FLID %d fifoRkey=0x%x fifoLkey=0x%x",
-            comm->base.backupVProps.ndevs > 2 ? "NCCL MergedDev" : "NCCL Dev",
-            backupDev, backupCommDev->base.ibDevN, backupIbDev->portNum, meta.backupQpInfo[q].qpn, backupDevInfo->mtu, backupDevInfo->lid,
-        backupDevInfo->gid.global.subnet_prefix, ncclIbExtractFlid(&backupDevInfo->gid), backupDevInfo->fifoRkey, backupCommDev->fifoMr->lkey);
-      }
-    } else { // RoCE
-      for (int q = 0; q < comm->base.nqps; q++) {
-        // Print just the QPs for this dev
-        if (comm->base.backupQps[q].devIndex == i)
-          INFO(NCCL_NET,"NET/IB: %s %d IbDev %d Port %d qpn %d mtu %d query_ece={supported=%d, vendor_id=0x%x, options=0x%x, comp_mask=0x%x} GID %ld (%lX/%lX) fifoRkey=0x%x fifoLkey=0x%x",
-            comm->base.backupVProps.ndevs > 2 ? "NCCL MergedDev" : "NCCL Dev", backupDev,
-            backupCommDev->base.ibDevN, backupIbDev->portNum, meta.backupQpInfo[q].qpn, backupDevInfo->mtu, meta.backupQpInfo[q].ece_supported, meta.backupQpInfo[q].ece.vendor_id, meta.backupQpInfo[q].ece.options, meta.backupQpInfo[q].ece.comp_mask
-            , (int64_t)backupCommDev->base.gidInfo.localGidIndex,
-            backupDevInfo->gid.global.subnet_prefix, backupDevInfo->gid.global.interface_id, backupDevInfo->fifoRkey, backupCommDev->fifoMr->lkey);
+    if (nccl_fault_tolerance_enable) {
+      // backup Pack local GID info
+      backupDevInfo->link_layer = backupCommDev->base.gidInfo.link_layer = backupIbDev->portAttr.link_layer;
+      NCCLCHECKGOTO(ncclIbGetGidIndex(backupIbDev->context, backupIbDev->portNum, &backupIbDev->portAttr, &backupCommDev->base.gidInfo.localGidIndex), ret, fail);
+      NCCLCHECKGOTO(wrap_ibv_query_gid(backupIbDev->context, backupIbDev->portNum, backupCommDev->base.gidInfo.localGidIndex, &backupCommDev->base.gidInfo.localGid), ret, fail);
+      backupDevInfo->gid.global.subnet_prefix = backupCommDev->base.gidInfo.localGid.global.subnet_prefix;
+      backupDevInfo->gid.global.interface_id = backupCommDev->base.gidInfo.localGid.global.interface_id;
+      // backup info logging
+      if (backupDevInfo->link_layer == IBV_LINK_LAYER_INFINIBAND) { // IB
+        for (int q = 0; q < comm->base.nqps; q++) {
+          // Print just the QPs for this dev
+          if (comm->base.backupQps[q].devIndex == i)
+            INFO(NCCL_NET,"NET/IB: %s %d IbDev %d Port %d qpn %d mtu %d LID %d subnet-prefix %lu  FLID %d fifoRkey=0x%x fifoLkey=0x%x",
+              comm->base.backupVProps.ndevs > 2 ? "NCCL MergedDev" : "NCCL Dev",
+              backupDev, backupCommDev->base.ibDevN, backupIbDev->portNum, meta.backupQpInfo[q].qpn, backupDevInfo->mtu, backupDevInfo->lid,
+          backupDevInfo->gid.global.subnet_prefix, ncclIbExtractFlid(&backupDevInfo->gid), backupDevInfo->fifoRkey, backupCommDev->fifoMr->lkey);
+        }
+      } else { // RoCE
+        for (int q = 0; q < comm->base.nqps; q++) {
+          // Print just the QPs for this dev
+          if (comm->base.backupQps[q].devIndex == i)
+            INFO(NCCL_NET,"NET/IB: %s %d IbDev %d Port %d qpn %d mtu %d query_ece={supported=%d, vendor_id=0x%x, options=0x%x, comp_mask=0x%x} GID %ld (%lX/%lX) fifoRkey=0x%x fifoLkey=0x%x",
+              comm->base.backupVProps.ndevs > 2 ? "NCCL MergedDev" : "NCCL Dev", backupDev,
+              backupCommDev->base.ibDevN, backupIbDev->portNum, meta.backupQpInfo[q].qpn, backupDevInfo->mtu, meta.backupQpInfo[q].ece_supported, meta.backupQpInfo[q].ece.vendor_id, meta.backupQpInfo[q].ece.options, meta.backupQpInfo[q].ece.comp_mask
+              , (int64_t)backupCommDev->base.gidInfo.localGidIndex,
+              backupDevInfo->gid.global.subnet_prefix, backupDevInfo->gid.global.interface_id, backupDevInfo->fifoRkey, backupCommDev->fifoMr->lkey);
+        }
       }
     }
     
@@ -1547,14 +1564,16 @@ ib_recv_dev_list:
   meta.sl = (ncclParamIbSl() != -1) ? ncclParamIbSl() : (config && config->trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? config->trafficClass : NCCL_IB_SL_DEFAULT;
   meta.tc = (ncclParamIbTc() != -1) ? ncclParamIbTc() : (config && config->trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? config->trafficClass : NCCL_IB_TC_DEFAULT;
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
-  strncpy(meta.backupDevName, backupMergedDev->devName, MAX_MERGED_DEV_NAME);
+  if (nccl_fault_tolerance_enable) strncpy(meta.backupDevName, backupMergedDev->devName, MAX_MERGED_DEV_NAME);
 
   for(int q = 0; q < comm->base.nqps; q++){
     *(u_int *)comm->base.qps[q].srcIp = *(u_int*)(&comm->devs[comm->base.qps[q].devIndex].base.gidInfo.localGid.raw[12]);
     comm->base.qps[q].NetworkCardName = meta.devName;
     
-    *(u_int *)comm->base.backupQps[q].srcIp = *(u_int*)(&comm->backupDevs[comm->base.backupQps[q].devIndex].base.gidInfo.localGid.raw[12]);
-    if(meta.backupDevName[0] != '\0') comm->base.backupQps[q].NetworkCardName = meta.backupDevName;
+    if (nccl_fault_tolerance_enable) {
+      *(u_int *)comm->base.backupQps[q].srcIp = *(u_int*)(&comm->backupDevs[comm->base.backupQps[q].devIndex].base.gidInfo.localGid.raw[12]);
+      if(meta.backupDevName[0] != '\0') comm->base.backupQps[q].NetworkCardName = meta.backupDevName;
+    }
   }
 
   stage->state = ncclIbCommStateSend;
@@ -1592,13 +1611,15 @@ ib_connect:
       }
     }
 
-    int backupIbDev0 = comm->backupDevs[0].base.ibDevN;
-    link_layer = ncclIbDevs[backupIbDev0].portAttr.link_layer;
-    for (int i = 0; i < remMeta.ndevs; i++) {
-      if (remMeta.backupDevs[i].link_layer != link_layer) {
-        WARN("NET/IB : Remote %s device is incompatible with the local [%d]%s:%d/%s. Try selecting NICs of only one link type using NCCL_IB_HCA",
-             NCCL_IB_LLSTR(remMeta.backupDevs[i].link_layer), backupIbDev0, ncclIbDevs[backupIbDev0].devName, ncclIbDevs[backupIbDev0].portNum, NCCL_IB_LLSTR(link_layer));
-        return ncclInternalError;
+    if (nccl_fault_tolerance_enable) {
+      int backupIbDev0 = comm->backupDevs[0].base.ibDevN;
+      link_layer = ncclIbDevs[backupIbDev0].portAttr.link_layer;
+      for (int i = 0; i < remMeta.ndevs; i++) {
+        if (remMeta.backupDevs[i].link_layer != link_layer) {
+          WARN("NET/IB : Remote %s device is incompatible with the local [%d]%s:%d/%s. Try selecting NICs of only one link type using NCCL_IB_HCA",
+              NCCL_IB_LLSTR(remMeta.backupDevs[i].link_layer), backupIbDev0, ncclIbDevs[backupIbDev0].devName, ncclIbDevs[backupIbDev0].portNum, NCCL_IB_LLSTR(link_layer));
+          return ncclInternalError;
+        }
       }
     }
   }
@@ -1609,15 +1630,17 @@ ib_connect:
     comm->base.remDevs[i].remoteGid.global.interface_id = comm->base.remDevs[i].gid.global.interface_id;
     comm->base.remDevs[i].remoteGid.global.subnet_prefix = comm->base.remDevs[i].gid.global.subnet_prefix;
 
-    comm->base.backupRemDevs[i] = remMeta.backupDevs[i];
-    comm->base.backupRemDevs[i].remoteGid.global.interface_id = comm->base.backupRemDevs[i].gid.global.interface_id;
-    comm->base.backupRemDevs[i].remoteGid.global.subnet_prefix = comm->base.backupRemDevs[i].gid.global.subnet_prefix;
+    if (nccl_fault_tolerance_enable) {
+      comm->base.backupRemDevs[i] = remMeta.backupDevs[i];
+      comm->base.backupRemDevs[i].remoteGid.global.interface_id = comm->base.backupRemDevs[i].gid.global.interface_id;
+      comm->base.backupRemDevs[i].remoteGid.global.subnet_prefix = comm->base.backupRemDevs[i].gid.global.subnet_prefix;
+    }
 
     // Retain remote sizes fifo info and prepare RDMA ops
     comm->remSizesFifo.rkeys[i] = remMeta.devs[i].fifoRkey;
     comm->remSizesFifo.addr = remMeta.fifoAddr;
 
-    comm->remSizesFifo.backupRkeys[i] = remMeta.backupDevs[i].fifoRkey;
+    if (nccl_fault_tolerance_enable) comm->remSizesFifo.backupRkeys[i] = remMeta.backupDevs[i].fifoRkey;
   }
 
   for(int q = 0; q < comm->base.nqps; q++){
@@ -1625,13 +1648,17 @@ ib_connect:
     // struct ncclIbDevInfo* remDevInfo = remMeta.devs + remQpInfo->devIndex;
     *(u_int *)comm->base.qps[q].dscIp = *(u_int*)(&comm->base.remDevs[remQpInfo->devIndex].remoteGid.raw[12]);
 
-    struct ncclIbQpInfo* backupRemQpInfo = remMeta.backupQpInfo + q;
-    *(u_int *)comm->base.backupQps[q].dscIp = *(u_int*)(&comm->base.backupRemDevs[backupRemQpInfo->devIndex].remoteGid.raw[12]);
+    if (nccl_fault_tolerance_enable) {
+      struct ncclIbQpInfo *backupRemQpInfo = remMeta.backupQpInfo + q;
+      *(u_int *)comm->base.backupQps[q].dscIp = *(u_int *)(&comm->base.backupRemDevs[backupRemQpInfo->devIndex].remoteGid.raw[12]);
+    }
   }
 
   for (int i=0; i < comm->base.vProps.ndevs; i++) {
     NCCLCHECKGOTO(wrap_ibv_reg_mr(comm->remSizesFifo.mrs+i, comm->devs[i].base.pd, &comm->remSizesFifo.elems, sizeof(int)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
-    NCCLCHECKGOTO(wrap_ibv_reg_mr(comm->remSizesFifo.mrs+i+NCCL_IB_MAX_DEVS_PER_NIC, comm->backupDevs[i].base.pd, &comm->remSizesFifo.elems, sizeof(int)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
+    if (nccl_fault_tolerance_enable) {
+      NCCLCHECKGOTO(wrap_ibv_reg_mr(comm->remSizesFifo.mrs+i+NCCL_IB_MAX_DEVS_PER_NIC, comm->backupDevs[i].base.pd, &comm->remSizesFifo.elems, sizeof(int)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
+    }
   }
   comm->base.nRemDevs = remMeta.ndevs;
 
@@ -1639,9 +1666,13 @@ ib_connect:
     struct ncclIbQpInfo* remQpInfo   = remMeta.qpInfo + q;
     struct ncclIbDevInfo* remDevInfo = remMeta.devs + remQpInfo->devIndex;
 
-    struct ncclIbQpInfo* backupRemQpInfo = remMeta.backupQpInfo + q;
-    struct ncclIbDevInfo* backupRemDevInfo = remMeta.backupDevs + backupRemQpInfo->devIndex;
-
+    struct ncclIbQpInfo *backupRemQpInfo = NULL;
+    struct ncclIbDevInfo *backupRemDevInfo = NULL;
+    if (nccl_fault_tolerance_enable) {
+      backupRemQpInfo = remMeta.backupQpInfo + q;
+      backupRemDevInfo = remMeta.backupDevs + backupRemQpInfo->devIndex;
+    }
+    
     // Assign per-QP remDev
     comm->base.qps[q].remDevIdx = remQpInfo->devIndex;
     int devIndex = comm->base.qps[q].devIndex;
@@ -1665,18 +1696,20 @@ ib_connect:
     comm->base.qps[q].sl = remMeta.sl;
 
     // Assign per-QP backup remDev
-    comm->base.backupQps[q].remDevIdx = backupRemQpInfo->devIndex;
-    devIndex = comm->base.backupQps[q].devIndex;
-    ncclIbSendCommDev* backupCommDev = comm->backupDevs + devIndex;
+    if (nccl_fault_tolerance_enable) {
+      comm->base.backupQps[q].remDevIdx = backupRemQpInfo->devIndex;
+      devIndex = comm->base.backupQps[q].devIndex;
+      ncclIbSendCommDev *backupCommDev = comm->backupDevs + devIndex;
 
-    qp = comm->base.backupQps[q].qp;
-    if (backupRemQpInfo->ece_supported)
-      NCCLCHECKGOTO(wrap_ibv_set_ece(qp, &backupRemQpInfo->ece, &backupRemQpInfo->ece_supported), ret, fail);
-    
-    ncclIbDev* backupIbDev = ncclIbDevs + backupCommDev->base.ibDevN;
-    backupRemDevInfo->mtu = std::min(backupRemDevInfo->mtu, backupIbDev->portAttr.active_mtu);
-    NCCLCHECKGOTO(ncclIbRtrQp(qp, &backupCommDev->base.gidInfo, backupRemQpInfo->qpn, backupRemDevInfo, false, remMeta.tc, remMeta.sl), ret, fail);
-    NCCLCHECKGOTO(ncclIbRtsQp(qp), ret, fail);
+      qp = comm->base.backupQps[q].qp;
+      if (backupRemQpInfo->ece_supported)
+        NCCLCHECKGOTO(wrap_ibv_set_ece(qp, &backupRemQpInfo->ece, &backupRemQpInfo->ece_supported), ret, fail);
+
+      ncclIbDev *backupIbDev = ncclIbDevs + backupCommDev->base.ibDevN;
+      backupRemDevInfo->mtu = std::min(backupRemDevInfo->mtu, backupIbDev->portAttr.active_mtu);
+      NCCLCHECKGOTO(ncclIbRtrQp(qp, &backupCommDev->base.gidInfo, backupRemQpInfo->qpn, backupRemDevInfo, false, remMeta.tc, remMeta.sl), ret, fail);
+      NCCLCHECKGOTO(ncclIbRtsQp(qp), ret, fail);
+    }
   }
 
   if (link_layer == IBV_LINK_LAYER_ETHERNET ) { // RoCE
@@ -1689,15 +1722,17 @@ ib_connect:
     }
   }
 
-  if (link_layer == IBV_LINK_LAYER_ETHERNET ) { // RoCE
-    for (int q = 0; q < comm->base.nqps; q++) {
-    struct ncclIbQp* qp = comm->base.backupQps + q;
-    int ibDevN = comm->backupDevs[qp->devIndex].base.ibDevN;
-    struct ncclIbDev* ibDev = ncclIbDevs + ibDevN;
-    INFO(NCCL_NET,"NET/IB: IbDev %d Port %d qpn %d set_ece={supported=%d, vendor_id=0x%x, options=0x%x, comp_mask=0x%x}",
-      ibDevN, ibDev->portNum, remMeta.backupQpInfo[q].qpn, remMeta.backupQpInfo[q].ece_supported, remMeta.backupQpInfo[q].ece.vendor_id, remMeta.backupQpInfo[q].ece.options, remMeta.backupQpInfo[q].ece.comp_mask);
-    }
-  }  
+  if (nccl_fault_tolerance_enable) {
+    if (link_layer == IBV_LINK_LAYER_ETHERNET ) { // RoCE
+      for (int q = 0; q < comm->base.nqps; q++) {
+        struct ncclIbQp* qp = comm->base.backupQps + q;
+        int ibDevN = comm->backupDevs[qp->devIndex].base.ibDevN;
+        struct ncclIbDev* ibDev = ncclIbDevs + ibDevN;
+        INFO(NCCL_NET,"NET/IB: IbDev %d Port %d qpn %d set_ece={supported=%d, vendor_id=0x%x, options=0x%x, comp_mask=0x%x}",
+          ibDevN, ibDev->portNum, remMeta.backupQpInfo[q].qpn, remMeta.backupQpInfo[q].ece_supported, remMeta.backupQpInfo[q].ece.vendor_id, remMeta.backupQpInfo[q].ece.options, remMeta.backupQpInfo[q].ece.comp_mask);
+      }
+    }  
+  }
 
   comm->base.nDataQps = std::max(comm->base.vProps.ndevs, comm->base.nRemDevs);
 
@@ -1860,6 +1895,12 @@ ib_recv:
   struct ncclIbDevInfo* backupRemDevInfo;
   struct ncclIbQp* backupQp;
 
+  // To prevent compile warning when disable Fault Tolerance
+  backupRCommDev = NULL;
+  backupRemDevInfo = NULL;
+  backupQp = NULL;
+  backupIbDev = NULL;
+
   mergedDev = ncclIbMergedDevs + lComm->dev;
   backupMergedDev = ncclIbMergedDevs + (lComm->dev ^ 1);
   rComm->base.nRemDevs = remMeta.ndevs;
@@ -1880,12 +1921,14 @@ ib_recv:
     NCCLCHECKGOTO(wrap_ibv_query_gid(ibDev->context, ibDev->portNum, rCommDev->base.gidInfo.localGidIndex, &rCommDev->base.gidInfo.localGid), ret, fail);
 
     // backup
-    backupRCommDev = rComm->backupDevs + i;
-    backupIbDevN = rComm->base.backupVProps.devs[i];
-    NCCLCHECKGOTO(ncclIbInitCommDevBase(backupIbDevN, &backupRCommDev->base, &rComm->base.backupStats, true), ret, fail);
-    backupIbDev = ncclIbDevs + backupIbDevN;
-    NCCLCHECKGOTO(ncclIbGetGidIndex(backupIbDev->context, backupIbDev->portNum, &backupIbDev->portAttr, &backupRCommDev->base.gidInfo.localGidIndex), ret, fail);
-    NCCLCHECKGOTO(wrap_ibv_query_gid(backupIbDev->context, backupIbDev->portNum, backupRCommDev->base.gidInfo.localGidIndex, &backupRCommDev->base.gidInfo.localGid), ret, fail);
+    if (nccl_fault_tolerance_enable) {
+      backupRCommDev = rComm->backupDevs + i;
+      backupIbDevN = rComm->base.backupVProps.devs[i];
+      backupIbDev = ncclIbDevs + backupIbDevN;
+      NCCLCHECKGOTO(ncclIbInitCommDevBase(backupIbDevN, &backupRCommDev->base, &rComm->base.backupStats, true), ret, fail);
+      NCCLCHECKGOTO(ncclIbGetGidIndex(backupIbDev->context, backupIbDev->portNum, &backupIbDev->portAttr, &backupRCommDev->base.gidInfo.localGidIndex), ret, fail);
+      NCCLCHECKGOTO(wrap_ibv_query_gid(backupIbDev->context, backupIbDev->portNum, backupRCommDev->base.gidInfo.localGidIndex, &backupRCommDev->base.gidInfo.localGid), ret, fail);
+    }
 
     if (link_layer == IBV_LINK_LAYER_UNSPECIFIED) link_layer = ibDev->portAttr.link_layer;
     if (link_layer != ibDev->portAttr.link_layer) {
@@ -1903,9 +1946,11 @@ ib_recv:
     rComm->base.remDevs[i].remoteGid.global.subnet_prefix = rComm->base.remDevs[i].gid.global.subnet_prefix;
 
     // back up
-    rComm->base.backupRemDevs[i] = remMeta.backupDevs[i];
-    rComm->base.backupRemDevs[i].remoteGid.global.interface_id  = rComm->base.backupRemDevs[i].gid.global.interface_id;
-    rComm->base.backupRemDevs[i].remoteGid.global.subnet_prefix = rComm->base.backupRemDevs[i].gid.global.subnet_prefix;
+    if (nccl_fault_tolerance_enable) {
+      rComm->base.backupRemDevs[i] = remMeta.backupDevs[i];
+      rComm->base.backupRemDevs[i].remoteGid.global.interface_id = rComm->base.backupRemDevs[i].gid.global.interface_id;
+      rComm->base.backupRemDevs[i].remoteGid.global.subnet_prefix = rComm->base.backupRemDevs[i].gid.global.subnet_prefix;
+    }
 
     if (remMeta.devs[i].link_layer != link_layer) {
       int ibDev0 = rComm->devs[0].base.ibDevN;
@@ -1930,11 +1975,13 @@ ib_recv:
     rCommDev = rComm->devs + devIndex;
     qp->remDevIdx = remDevIndex;
 
-    backupRemDevIndex = remMeta.backupQpInfo[q].devIndex;
-    backupRemDevInfo = remMeta.backupDevs + backupRemDevIndex;
-    backupQp = rComm->base.backupQps + q;
-    backupRCommDev = rComm->backupDevs + backupDevIndex;
-    backupQp->remDevIdx = backupRemDevIndex;
+    if (nccl_fault_tolerance_enable) {
+      backupRemDevIndex = remMeta.backupQpInfo[q].devIndex;
+      backupRemDevInfo = remMeta.backupDevs + backupRemDevIndex;
+      backupQp = rComm->base.backupQps + q;
+      backupRCommDev = rComm->backupDevs + backupDevIndex;
+      backupQp->remDevIdx = backupRemDevIndex;
+    }
 
     // Local ibDevN
     ibDevN = rComm->devs[devIndex].base.ibDevN;
@@ -1944,11 +1991,13 @@ ib_recv:
     devIndex = (devIndex + 1) % rComm->base.vProps.ndevs;
 
     // back up local ibDevN
-    backupIbDevN = rComm->backupDevs[backupDevIndex].base.ibDevN;
-    backupIbDev = ncclIbDevs + backupIbDevN;
-    NCCLCHECKGOTO(ncclIbCreateQp(backupIbDev->portNum, &backupRCommDev->base, IBV_ACCESS_REMOTE_WRITE, &rComm->base.backupStats, backupQp, true), ret, fail);
-    backupQp->devIndex = backupDevIndex;
-    backupDevIndex = (backupDevIndex + 1) % rComm->base.backupVProps.ndevs;
+    if (nccl_fault_tolerance_enable) {
+      backupIbDevN = rComm->backupDevs[backupDevIndex].base.ibDevN;
+      backupIbDev = ncclIbDevs + backupIbDevN;
+      NCCLCHECKGOTO(ncclIbCreateQp(backupIbDev->portNum, &backupRCommDev->base, IBV_ACCESS_REMOTE_WRITE, &rComm->base.backupStats, backupQp, true), ret, fail);
+      backupQp->devIndex = backupDevIndex;
+      backupDevIndex = (backupDevIndex + 1) % rComm->base.backupVProps.ndevs;
+    }
 
     // Set the ece (enhanced connection establishment) on this QP before RTR
     if (remMeta.qpInfo[q].ece_supported) {
@@ -1970,21 +2019,23 @@ ib_recv:
     }
 
     // Set the backup ece (enhanced connection establishment) on this QP before RTR
-    if (remMeta.backupQpInfo[q].ece_supported) {
-      // Coverity suspects a copy-paste error below due to the use of remMeta in one argument and meta in another.
-      // However, this has been confirmed to be intentional.
-      // coverity[copy_paste_error]
-      NCCLCHECKGOTO(wrap_ibv_set_ece(backupQp->qp, &remMeta.backupQpInfo[q].ece, &meta.backupQpInfo[q].ece_supported), ret, fail);
-    } else {
-      meta.backupQpInfo[q].ece_supported = 0;
-    }
+    if (nccl_fault_tolerance_enable) {
+      if (remMeta.backupQpInfo[q].ece_supported) {
+        // Coverity suspects a copy-paste error below due to the use of remMeta in one argument and meta in another.
+        // However, this has been confirmed to be intentional.
+        // coverity[copy_paste_error]
+        NCCLCHECKGOTO(wrap_ibv_set_ece(backupQp->qp, &remMeta.backupQpInfo[q].ece, &meta.backupQpInfo[q].ece_supported), ret, fail);
+      } else {
+        meta.backupQpInfo[q].ece_supported = 0;
+      }
 
-    NCCLCHECKGOTO(ncclIbRtrQp(backupQp->qp, &backupRCommDev->base.gidInfo, remMeta.backupQpInfo[q].qpn, backupRemDevInfo, true, remMeta.tc, remMeta.sl), ret, fail);
-    NCCLCHECKGOTO(ncclIbRtsQp(backupQp->qp), ret, fail);
+      NCCLCHECKGOTO(ncclIbRtrQp(backupQp->qp, &backupRCommDev->base.gidInfo, remMeta.backupQpInfo[q].qpn, backupRemDevInfo, true, remMeta.tc, remMeta.sl), ret, fail);
+      NCCLCHECKGOTO(ncclIbRtsQp(backupQp->qp), ret, fail);
 
-    // Query the reduced ece for this QP (matching enhancements between the requestor and the responder)
-    if (remMeta.backupQpInfo[q].ece_supported && meta.backupQpInfo[q].ece_supported) {
-      NCCLCHECKGOTO(wrap_ibv_query_ece(backupQp->qp, &meta.backupQpInfo[q].ece, &meta.backupQpInfo[q].ece_supported), ret, fail);
+      // Query the reduced ece for this QP (matching enhancements between the requestor and the responder)
+      if (remMeta.backupQpInfo[q].ece_supported && meta.backupQpInfo[q].ece_supported) {
+        NCCLCHECKGOTO(wrap_ibv_query_ece(backupQp->qp, &meta.backupQpInfo[q].ece, &meta.backupQpInfo[q].ece_supported), ret, fail);
+      }
     }
 
     memcpy(&qp->gidInfo, &rCommDev->base.gidInfo, sizeof(struct ncclIbGidInfo));
@@ -1999,15 +2050,17 @@ ib_recv:
   rComm->flushEnabled = ((ncclIbGdrSupport() == ncclSuccess || ncclIbDmaBufSupport(lComm->dev) == ncclSuccess)
                             && (ncclParamIbGdrFlushDisable() == 0)) ? 1 : 0;
 
-  rComm->backupFlushEnabled = ((ncclIbGdrSupport() == ncclSuccess || ncclIbDmaBufSupport(lComm->dev ^ 1) == ncclSuccess) 
+  if (nccl_fault_tolerance_enable) rComm->backupFlushEnabled = ((ncclIbGdrSupport() == ncclSuccess || ncclIbDmaBufSupport(lComm->dev ^ 1) == ncclSuccess) 
                             && (ncclParamIbGdrFlushDisable() == 0)) ? 1 : 0;
 
   for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
     rCommDev = rComm->devs + i;
     ibDev = ncclIbDevs + rCommDev->base.ibDevN;
 
-    backupRCommDev = rComm->backupDevs + i;
-    backupIbDev = ncclIbDevs + backupRCommDev->base.ibDevN;
+    if (nccl_fault_tolerance_enable) {
+      backupRCommDev = rComm->backupDevs + i;
+      backupIbDev = ncclIbDevs + backupRCommDev->base.ibDevN;
+    }
 
     // Retain remote fifo info and prepare my RDMA ops
     rComm->remFifo.addr = remMeta.fifoAddr;
@@ -2015,18 +2068,20 @@ ib_recv:
     rCommDev->fifoSge.lkey = rCommDev->fifoMr->lkey;
     if (ncclParamIbUseInline()) rComm->remFifo.flags = IBV_SEND_INLINE;
 
-    // backup Retain remote fifo info and prepare my RDMA ops
-    NCCLCHECK(wrap_ibv_reg_mr(&backupRCommDev->fifoMr, backupRCommDev->base.pd, &rComm->remFifo.elems, sizeof(struct ncclIbSendFifo) * MAX_REQUESTS * NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ));
-    backupRCommDev->fifoSge.lkey = backupRCommDev->fifoMr->lkey;
+    if (nccl_fault_tolerance_enable) {
+      // backup Retain remote fifo info and prepare my RDMA ops
+      NCCLCHECK(wrap_ibv_reg_mr(&backupRCommDev->fifoMr, backupRCommDev->base.pd, &rComm->remFifo.elems, sizeof(struct ncclIbSendFifo) * MAX_REQUESTS * NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ));
+      backupRCommDev->fifoSge.lkey = backupRCommDev->fifoMr->lkey;
 
-    // Retain remote sync fifo info and prepare my RDMA ops
-    rComm->remSyncFifo.addr = remMeta.syncFifoAddr;
-    NCCLCHECK(wrap_ibv_reg_mr(&rCommDev->syncFifoMr, rCommDev->base.pd, &rComm->remSyncFifo.elems, sizeof(struct ncclIbSyncFifo)*MAX_REQUESTS, IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ));
-    rCommDev->syncFifoSge.lkey = rCommDev->syncFifoMr->lkey;
+      // Retain remote sync fifo info and prepare my RDMA ops
+      rComm->remSyncFifo.addr = remMeta.syncFifoAddr;
+      NCCLCHECK(wrap_ibv_reg_mr(&rCommDev->syncFifoMr, rCommDev->base.pd, &rComm->remSyncFifo.elems, sizeof(struct ncclIbSyncFifo) * MAX_REQUESTS, IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ));
+      rCommDev->syncFifoSge.lkey = rCommDev->syncFifoMr->lkey;
 
-    // backup Retain remote sync fifo info and prepare my RDMA ops
-    NCCLCHECK(wrap_ibv_reg_mr(&backupRCommDev->syncFifoMr, backupRCommDev->base.pd, &rComm->remSyncFifo.elems, sizeof(struct ncclIbSyncFifo)*MAX_REQUESTS, IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ));
-    backupRCommDev->syncFifoSge.lkey = backupRCommDev->syncFifoMr->lkey;
+      // backup Retain remote sync fifo info and prepare my RDMA ops
+      NCCLCHECK(wrap_ibv_reg_mr(&backupRCommDev->syncFifoMr, backupRCommDev->base.pd, &rComm->remSyncFifo.elems, sizeof(struct ncclIbSyncFifo) * MAX_REQUESTS, IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ));
+      backupRCommDev->syncFifoSge.lkey = backupRCommDev->syncFifoMr->lkey;
+    }
 
     // Allocate Flush dummy buffer for GPU Direct RDMA
     if (rComm->flushEnabled) {
@@ -2051,7 +2106,7 @@ ib_recv:
     }
 
     // backup Allocate Flush dummy buffer for GPU Direct RDMA
-    if (rComm->backupFlushEnabled) {
+    if (rComm->backupFlushEnabled && nccl_fault_tolerance_enable) {
       NCCLCHECKGOTO(wrap_ibv_reg_mr(&backupRCommDev->gpuFlush.hostMr, backupRCommDev->base.pd, &rComm->gpuFlushHostMem, sizeof(int), IBV_ACCESS_LOCAL_WRITE), ret, fail);
       backupRCommDev->gpuFlush.sge.addr = (uint64_t)&rComm->gpuFlushHostMem;
       backupRCommDev->gpuFlush.sge.length = 1;
@@ -2079,20 +2134,24 @@ ib_recv:
     meta.devs[i].mtu                            = ibDev->portAttr.active_mtu;
 
     // backup Fill Handle
-    meta.backupDevs[i].lid                      = backupIbDev->portAttr.lid;
-    meta.backupDevs[i].link_layer               = backupRCommDev->base.gidInfo.link_layer = backupIbDev->portAttr.link_layer;
-    meta.backupDevs[i].ib_port                  = backupIbDev->portNum;
-    meta.backupDevs[i].gid.global.subnet_prefix = backupRCommDev->base.gidInfo.localGid.global.subnet_prefix;
-    meta.backupDevs[i].gid.global.interface_id  = backupRCommDev->base.gidInfo.localGid.global.interface_id;
-    meta.backupDevs[i].mtu                      = backupIbDev->portAttr.active_mtu;
+    if (nccl_fault_tolerance_enable) {
+      meta.backupDevs[i].lid = backupIbDev->portAttr.lid;
+      meta.backupDevs[i].link_layer = backupRCommDev->base.gidInfo.link_layer = backupIbDev->portAttr.link_layer;
+      meta.backupDevs[i].ib_port = backupIbDev->portNum;
+      meta.backupDevs[i].gid.global.subnet_prefix = backupRCommDev->base.gidInfo.localGid.global.subnet_prefix;
+      meta.backupDevs[i].gid.global.interface_id = backupRCommDev->base.gidInfo.localGid.global.interface_id;
+      meta.backupDevs[i].mtu = backupIbDev->portAttr.active_mtu;
+    }
 
     // Prepare sizes fifo
     NCCLCHECKGOTO(wrap_ibv_reg_mr(&rComm->devs[i].sizesFifoMr, rComm->devs[i].base.pd, rComm->sizesFifo, sizeof(int)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
     meta.devs[i].fifoRkey = rComm->devs[i].sizesFifoMr->rkey;
 
     // backup Prepare sizes fifo
-    NCCLCHECKGOTO(wrap_ibv_reg_mr(&rComm->backupDevs[i].sizesFifoMr, rComm->backupDevs[i].base.pd, rComm->sizesFifo, sizeof(int)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
-    meta.backupDevs[i].fifoRkey = rComm->backupDevs[i].sizesFifoMr->rkey;
+    if (nccl_fault_tolerance_enable) {
+      NCCLCHECKGOTO(wrap_ibv_reg_mr(&rComm->backupDevs[i].sizesFifoMr, rComm->backupDevs[i].base.pd, rComm->sizesFifo, sizeof(int) * MAX_REQUESTS * NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ), ret, fail);
+      meta.backupDevs[i].fifoRkey = rComm->backupDevs[i].sizesFifoMr->rkey;
+    }
   }
   meta.fifoAddr = (uint64_t)rComm->sizesFifo;
   meta.sl = remMeta.sl;
@@ -2102,12 +2161,14 @@ ib_recv:
     meta.qpInfo[q].qpn      = rComm->base.qps[q].qp->qp_num;
     meta.qpInfo[q].devIndex = rComm->base.qps[q].devIndex;
 
-    meta.backupQpInfo[q].qpn      = rComm->base.backupQps[q].qp->qp_num;
-    meta.backupQpInfo[q].devIndex = rComm->base.backupQps[q].devIndex;
+    if (nccl_fault_tolerance_enable) {
+      meta.backupQpInfo[q].qpn = rComm->base.backupQps[q].qp->qp_num;
+      meta.backupQpInfo[q].devIndex = rComm->base.backupQps[q].devIndex;
+    }
   }
   meta.ndevs = rComm->base.vProps.ndevs;
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
-  strncpy(meta.backupDevName, backupMergedDev->devName, MAX_MERGED_DEV_NAME);
+  if (nccl_fault_tolerance_enable) strncpy(meta.backupDevName, backupMergedDev->devName, MAX_MERGED_DEV_NAME);
   rComm->base.nDataQps = std::max(rComm->base.vProps.ndevs, rComm->base.nRemDevs);
 
   stage->state = ncclIbCommStateSend;
@@ -2122,15 +2183,17 @@ ib_recv:
   for(int q = 0; q < rComm->base.nqps; q++){
     *(u_int *)rComm->base.qps[q].srcIp = *(u_int*)(&rComm->devs[rComm->base.qps[q].devIndex].base.gidInfo.localGid.raw[12]);
 
-    *(u_int *)rComm->base.backupQps[q].srcIp = *(u_int*)(&rComm->backupDevs[rComm->base.backupQps[q].devIndex].base.gidInfo.localGid.raw[12]);
+    if (nccl_fault_tolerance_enable) *(u_int *)rComm->base.backupQps[q].srcIp = *(u_int*)(&rComm->backupDevs[rComm->base.backupQps[q].devIndex].base.gidInfo.localGid.raw[12]);
   }
   for(int q = 0; q < rComm->base.nqps; q++){
     struct ncclIbQpInfo* remQpInfo   = remMeta.qpInfo + q;
     // struct ncclIbDevInfo* remDevInfo = remMeta.devs + remQpInfo->devIndex;
     *(u_int *)rComm->base.qps[q].dscIp = *(u_int*)(&rComm->base.remDevs[remQpInfo->devIndex].remoteGid.raw[12]);
 
-    struct ncclIbQpInfo* remBackupQpInfo   = remMeta.backupQpInfo + q;
-    *(u_int *)rComm->base.backupQps[q].dscIp = *(u_int*)(&rComm->base.backupRemDevs[remBackupQpInfo->devIndex].remoteGid.raw[12]);
+    if (nccl_fault_tolerance_enable) {
+      struct ncclIbQpInfo *remBackupQpInfo = remMeta.backupQpInfo + q;
+      *(u_int *)rComm->base.backupQps[q].dscIp = *(u_int *)(&rComm->base.backupRemDevs[remBackupQpInfo->devIndex].remoteGid.raw[12]);
+    }
   }
 
 ib_send:
@@ -2278,8 +2341,10 @@ ncclResult_t ncclIbRegMrDmaBuf(void* comm, void* data, size_t size, int type, ui
     NCCLCHECKGOTO(ncclIbRegMrDmaBufInternal(devComm, data, size, type, offset, fd, mhandleWrapper->mrs + i), ret, fail);
 
     // fill backup mhandleWrapper->mrs
-    struct ncclIbNetCommDevBase* backupDevComm = ncclIbGetBackupNetCommDevBase(base, i);
-    NCCLCHECKGOTO(ncclIbRegMrDmaBufInternal(backupDevComm, data, size, type, offset, fd, mhandleWrapper->mrs + i + NCCL_IB_MAX_DEVS_PER_NIC), ret, fail);
+    if (nccl_fault_tolerance_enable) {
+      struct ncclIbNetCommDevBase *backupDevComm = ncclIbGetBackupNetCommDevBase(base, i);
+      NCCLCHECKGOTO(ncclIbRegMrDmaBufInternal(backupDevComm, data, size, type, offset, fd, mhandleWrapper->mrs + i + NCCL_IB_MAX_DEVS_PER_NIC), ret, fail);
+    }
   }
   *mhandle = (void*) mhandleWrapper;
 exit:
@@ -2330,8 +2395,10 @@ ncclResult_t ncclIbDeregMr(void* comm, void* mhandle) {
     NCCLCHECK(ncclIbDeregMrInternal(devComm, mhandleWrapper->mrs[i]));
 
     // fill backup mhandleWrapper->mrs
-    struct ncclIbNetCommDevBase* backupDevComm = ncclIbGetBackupNetCommDevBase(base, i);
-    NCCLCHECK(ncclIbDeregMrInternal(backupDevComm, mhandleWrapper->mrs[i + NCCL_IB_MAX_DEVS_PER_NIC]));
+    if (nccl_fault_tolerance_enable) {
+      struct ncclIbNetCommDevBase *backupDevComm = ncclIbGetBackupNetCommDevBase(base, i);
+      NCCLCHECK(ncclIbDeregMrInternal(backupDevComm, mhandleWrapper->mrs[i + NCCL_IB_MAX_DEVS_PER_NIC]));
+    }
   }
   free(mhandleWrapper);
   return ncclSuccess;
@@ -2421,7 +2488,7 @@ ncclResult_t ncclIbMultiSend(struct ncclIbSendComm* comm, int slot, void* pHandl
 
     // check if qp is available
     bool if_backup = false;
-    if (comm->devs[devIndex].base.warn.is_warn == true) {
+    if (nccl_fault_tolerance_enable && comm->devs[devIndex].base.warn.is_warn == true) {
       qp = comm->base.backupQps + qpIndex;
       devIndex = qp->devIndex;
       if_backup = true;
@@ -2534,7 +2601,7 @@ ncclResult_t ncclIbIsend(void* sendComm, void* data, size_t size, int tag, void*
     if (size > slots[r].size) size = slots[r].size;
     // choose normal qp or backup qp according to the backup flag
     // we ensure use both normal or backup qp in dual ports
-    if (slots[r].if_backup != comm->devs[0].base.warn.is_warn) {
+    if (nccl_fault_tolerance_enable && slots[r].if_backup != comm->devs[0].base.warn.is_warn) {
       for (int d = 0; d < comm->base.vProps.ndevs; d++) {
         comm->devs[d].base.warn.is_warn = slots[r].if_backup;
       }
@@ -2567,7 +2634,7 @@ ncclResult_t ncclIbIsend(void* sendComm, void* data, size_t size, int tag, void*
       ncclIbQp* qp = comm->base.qps + qpIndex;
 
       bool if_backup = false;
-      if (comm->devs[qp->devIndex].base.warn.is_warn == true) {
+      if (nccl_fault_tolerance_enable && comm->devs[qp->devIndex].base.warn.is_warn == true) {
         qp = comm->base.backupQps + qpIndex;
         if_backup = true;
       }
@@ -2599,7 +2666,7 @@ ncclResult_t ncclIbIsend(void* sendComm, void* data, size_t size, int tag, void*
     // Store all lkeys
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       bool if_backup = false;
-      if (comm->devs[i].base.warn.is_warn == true) {
+      if (nccl_fault_tolerance_enable && comm->devs[i].base.warn.is_warn == true) {
         if_backup = true;
       }
       if (!if_backup) {
@@ -2747,12 +2814,13 @@ ncclResult_t ncclIbPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
   ncclIbQp* ctsQp = comm->base.qps + comm->base.devIndex;
   comm->base.devIndex = (comm->base.devIndex + 1) % comm->base.vProps.ndevs;
 
-  ncclIbQp *backupCtsQp = comm->base.backupQps + comm->base.backupDevIndex;
-  comm->base.backupDevIndex = (comm->base.backupDevIndex + 1) % comm->base.vProps.ndevs;
+  ncclIbQp *backupCtsQp = NULL;
 
   bool if_backup = false;
-  if (comm->devs[ctsQp->devIndex].base.warn.is_warn == true) {
+  if (nccl_fault_tolerance_enable && comm->devs[ctsQp->devIndex].base.warn.is_warn == true) {
     if_backup = true;
+    backupCtsQp = comm->base.backupQps + comm->base.backupDevIndex;
+    comm->base.backupDevIndex = (comm->base.backupDevIndex + 1) % comm->base.vProps.ndevs;
   }
 
   for (int i=0; i<n; i++) {
@@ -2761,7 +2829,7 @@ ncclResult_t ncclIbPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
 
     // Send all applicable rkeys
     for (int j = 0; j < comm->base.vProps.ndevs; j++) {
-      if(!comm->devs[j].base.warn.is_warn) localElem[i].rkeys[j] = mhandleWrapper->mrs[j]->rkey;
+      if(!nccl_fault_tolerance_enable || !comm->devs[j].base.warn.is_warn) localElem[i].rkeys[j] = mhandleWrapper->mrs[j]->rkey;
       else localElem[i].rkeys[j] = mhandleWrapper->mrs[j + NCCL_IB_MAX_DEVS_PER_NIC]->rkey;
     }
 
@@ -2916,7 +2984,7 @@ ncclResult_t ncclIbIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
 
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
     req->devBases[i] = &comm->devs[i].base;
-    req->backupDevBases[i] = &comm->backupDevs[i].base;
+    if (nccl_fault_tolerance_enable) req->backupDevBases[i] = &comm->backupDevs[i].base;
   }
 
   struct ibv_recv_wr wr;
@@ -2936,7 +3004,7 @@ ncclResult_t ncclIbIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
 
     bool if_backup = false;
     // check if qp is available
-    if (comm->devs[qp->devIndex].base.warn.is_warn == true) {
+    if (nccl_fault_tolerance_enable && comm->devs[qp->devIndex].base.warn.is_warn == true) {
       if_backup = true;
       qp = comm->base.backupQps + comm->base.qpIndex;
       ncclIbAddEvent(req, qp->devIndex, &comm->backupDevs[qp->devIndex].base, if_backup);
@@ -3003,7 +3071,7 @@ ncclResult_t ncclIbIflush(void* recvComm, int n, void** data, int* sizes, void**
     wr.wr_id = req - comm->base.reqs;
 
     bool if_backup = false;
-    if (comm->devs[i].base.warn.is_warn == true) {
+    if (nccl_fault_tolerance_enable && comm->devs[i].base.warn.is_warn == true) {
       if_backup = true;
       wr.wr.rdma.rkey = mhandle->mrs[i + NCCL_IB_MAX_DEVS_PER_NIC]->rkey;
       wr.sg_list = &comm->backupDevs[i].gpuFlush.sge;
@@ -3621,7 +3689,7 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
               r->events[0], r->events[1], elapsed, *done, ret, r->type, r, size, barrier_info, dbg_name);
       // re-send cts message to check link status
       // in this case, if link has errors, we can get wc with error status. By that, we can change to backup qp
-      ncclIbRePostFifoInTimeout(r);
+      if (nccl_fault_tolerance_enable) ncclIbRePostFifoInTimeout(r);
     }
   }
 
@@ -3637,7 +3705,7 @@ ncclResult_t ncclIbCloseSend(void* sendComm) {
       if (comm->base.qps[q].qp != NULL) {
         NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
       }
-      if (comm->base.backupQps[q].qp != NULL) {
+      if (nccl_fault_tolerance_enable && comm->base.backupQps[q].qp != NULL) {
         NCCLCHECK(wrap_ibv_destroy_qp(comm->base.backupQps[q].qp));
       }
     }     
@@ -3645,15 +3713,17 @@ ncclResult_t ncclIbCloseSend(void* sendComm) {
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbSendCommDev* commDev = comm->devs + i;
       if (commDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->fifoMr));
-      if (commDev->syncFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->syncFifoMr));
+      if (nccl_fault_tolerance_enable && commDev->syncFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->syncFifoMr));
       if (comm->remSizesFifo.mrs[i] != NULL) NCCLCHECK(wrap_ibv_dereg_mr(comm->remSizesFifo.mrs[i]));
-      if (comm->remSizesFifo.mrs[i + NCCL_IB_MAX_DEVS_PER_NIC] != NULL) NCCLCHECK(wrap_ibv_dereg_mr(comm->remSizesFifo.mrs[i + NCCL_IB_MAX_DEVS_PER_NIC]));
+      if (nccl_fault_tolerance_enable && comm->remSizesFifo.mrs[i + NCCL_IB_MAX_DEVS_PER_NIC] != NULL) NCCLCHECK(wrap_ibv_dereg_mr(comm->remSizesFifo.mrs[i + NCCL_IB_MAX_DEVS_PER_NIC]));
       NCCLCHECK(ncclIbDestroyBase(&commDev->base, false));
 
-      struct ncclIbSendCommDev *backupCommDev = comm->backupDevs + i;
-      if (backupCommDev->fifoMr!= NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->fifoMr));
-      if (backupCommDev->syncFifoMr!= NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->syncFifoMr));
-      NCCLCHECK(ncclIbDestroyBase(&backupCommDev->base, true));
+      if (nccl_fault_tolerance_enable) {
+        struct ncclIbSendCommDev *backupCommDev = comm->backupDevs + i;
+        if (backupCommDev->fifoMr!= NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->fifoMr));
+        if (backupCommDev->syncFifoMr!= NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->syncFifoMr));
+        NCCLCHECK(ncclIbDestroyBase(&backupCommDev->base, true));
+      }
     }
     free(comm);
   }
@@ -3668,7 +3738,7 @@ ncclResult_t ncclIbCloseRecv(void* recvComm) {
 
     for (int q = 0; q < comm->base.nqps; q++) {
       if (comm->base.qps[q].qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(comm->base.qps[q].qp));
-      if (comm->base.backupQps[q].qp!= NULL)
+      if (nccl_fault_tolerance_enable && comm->base.backupQps[q].qp!= NULL)
         NCCLCHECK(wrap_ibv_destroy_qp(comm->base.backupQps[q].qp));
     }
 
@@ -3679,19 +3749,21 @@ ncclResult_t ncclIbCloseRecv(void* recvComm) {
         if (commDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.hostMr));
       }
       if (commDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->fifoMr));
-      if (commDev->syncFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->syncFifoMr));
+      if (nccl_fault_tolerance_enable && commDev->syncFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->syncFifoMr));
       if (commDev->sizesFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->sizesFifoMr));
       NCCLCHECK(ncclIbDestroyBase(&commDev->base, false));
 
-      struct ncclIbRecvCommDev *backupCommDev = comm->backupDevs + i;
-      if (comm->flushEnabled) {
-        if (backupCommDev->gpuFlush.qp.qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(backupCommDev->gpuFlush.qp.qp));
-        if (backupCommDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->gpuFlush.hostMr));
+      if (nccl_fault_tolerance_enable) {
+        struct ncclIbRecvCommDev *backupCommDev = comm->backupDevs + i;
+        if (comm->flushEnabled) {
+          if (backupCommDev->gpuFlush.qp.qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(backupCommDev->gpuFlush.qp.qp));
+          if (backupCommDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->gpuFlush.hostMr));
+        }
+        if (backupCommDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->fifoMr));
+        if (backupCommDev->syncFifoMr!= NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->syncFifoMr));
+        if (backupCommDev->sizesFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->sizesFifoMr));
+        NCCLCHECK(ncclIbDestroyBase(&backupCommDev->base, true));
       }
-      if (backupCommDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->fifoMr));
-      if (backupCommDev->syncFifoMr!= NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->syncFifoMr));
-      if (backupCommDev->sizesFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(backupCommDev->sizesFifoMr));
-      NCCLCHECK(ncclIbDestroyBase(&backupCommDev->base, true));
     }
     free(comm);
   }
@@ -3711,7 +3783,7 @@ ncclResult_t saveChannelToQp(void* netSendComm, int channel_id){
   struct ncclIbSendComm* comm = (struct ncclIbSendComm*)netSendComm;
   for(int q = 0; q < comm->base.nqps; q++){
     comm->base.qps[q].channel_id = channel_id;
-    comm->base.backupQps[q].channel_id = channel_id;
+    if (nccl_fault_tolerance_enable) comm->base.backupQps[q].channel_id = channel_id;
   }
   return ncclSuccess;
 }
