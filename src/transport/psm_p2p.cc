@@ -48,9 +48,17 @@ struct p2pIpcExpInfo {
   uintptr_t offset;
 };
 
+struct p2pRegInfo {
+  int copyDone;          // Indicates if the copy operation is complete
+  int copyStarted;       // Indicates if the copy operation has started
+  int receiverReady;     // Indicates if the receiver is ready to receive data
+  void* receiverRegAddr; // Address of the receiver's registered memory(shared)
+  ssize_t receiverRegBytes;
+};
 struct p2pShm {
   struct ncclSendMem sendMem;
   struct ncclRecvMem recvMem;
+  struct p2pRegInfo zcAddrExchange;
 };
 struct p2pShmProxyInfo {
   // Shared memory between proxy and receiving GPU
@@ -70,6 +78,7 @@ struct p2pShmProxyInfo {
   cudaStream_t stream;
   cudaEvent_t events[PSM_STEPS];
   cudaStream_t cpStream;
+  // struct ncclP2pBuff p2pBuff; //  TODO
 };
 static_assert(sizeof(p2pConnectInfo) <= CONNECT_SIZE, "PSM P2P Connect info is too large");
 
@@ -521,6 +530,9 @@ static ncclResult_t psmP2pSendConnect(struct ncclComm* comm, struct ncclConnect*
   } else if (ncclParamPassSm()) {
     send->conn.tail = NULL;
     send->conn.head = NULL;
+    struct p2pShmProxyInfo* proxyInfo = (struct p2pShmProxyInfo*)send->proxyConn.connection->transportResources;
+    send->conn.ptrExchange = (void**)&proxyInfo->devShm->zcAddrExchange.receiverRegAddr;
+    send->conn.redOpArgExchange = (uint64_t*)&proxyInfo->devShm->zcAddrExchange.receiverRegBytes;
     NCCLCHECK(ncclProxyCallBlocking(comm, &send->proxyConn, ncclProxyMsgConnect, &send->conn.buffs[NCCL_PROTO_SIMPLE], sizeof(void*), NULL, 0));
   } else {
     send->conn.tail = &remDevMem->tail;
@@ -545,6 +557,8 @@ ncclResult_t psmP2pRecvConnect(struct ncclComm* comm, struct ncclConnect* connec
     NCCLCHECK(ncclShmImportShareableBuffer(comm, info->rank, &info->desc, (void**)&resources->shm, (void**)&resources->devShm, &resources->desc));
     recv->conn.tail = &resources->devShm->recvMem.tail;
     recv->conn.head = &resources->devShm->sendMem.head;
+    recv->conn.ptrExchange = (void**)&resources->devShm->zcAddrExchange.receiverRegAddr;
+    recv->conn.redOpArgExchange = (uint64_t*)&resources->devShm->zcAddrExchange.receiverRegBytes;
   } else {
     NCCLCHECK(p2pMap(comm, &recv->proxyConn, comm->peerInfo+rank, comm->peerInfo+info->rank, &info->p2pBuff, (void**)&remDevMem, &resources->sendMemIpc));
     resources->sendMemSameProc = P2P_SAME_PID((comm->peerInfo + rank), (comm->peerInfo + info->rank));
@@ -657,8 +671,9 @@ static ncclResult_t psmP2pSendProxySetup(struct ncclProxyConnection* connection,
     connection->transportResources = proxyInfo;
 
     // Create a SHM segment for the peer to attach to
-    shmSize = sizeof(struct ncclSendMem) + sizeof(struct ncclRecvMem);
+    shmSize = sizeof(struct p2pShm);
     NCCLCHECK(ncclShmAllocateShareableBuffer(shmSize, false, &proxyInfo->desc, (void**)&proxyInfo->shm, (void**)&proxyInfo->devShm));
+    memset(&proxyInfo->devShm->zcAddrExchange, 0, sizeof(proxyInfo->devShm->zcAddrExchange));
     memcpy(respBuff, proxyInfo, sizeof(struct p2pShmProxyInfo));
   } else {
     struct ncclP2pRequest* req = (struct ncclP2pRequest*)reqBuff;
@@ -812,145 +827,241 @@ static void computeChunksize(struct ncclProxySubArgs* sub) {
 }
 
 static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(!(args->readyEvent->load(std::memory_order_acquire))) return ncclSuccess;
-  if (args->state == ncclProxyOpReady) {
-    for (int s=0; s<args->nsubs; s++) {
-      struct ncclProxySubArgs* sub = args->subs+s;
-      struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
-      // Round to next multiple of sliceSteps
-      sub->base = ROUNDUP(resources->step, args->chunkSteps);
-      sub->posted = sub->transmitted = sub->done = 0;
-      // psm specific initilization
-      computeChunksize(sub);
-      sub->nsteps=(sub->nbytes + sub->chunkSize - 1) / sub->chunkSize;
-      resources->shm->sendMem.head = sub->base;
-      sub->offset = 0;
+  if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+  if (args->reg) {
+    if (args->state == ncclProxyOpReady) {
+      int readyCnt = 0;
+      for (int s=0; s<args->nsubs; s++) {
+        struct ncclProxySubArgs* sub = args->subs + s; 
+        volatile struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*)(sub->connection->transportResources);
+        if (resources->devShm->zcAddrExchange.receiverReady) {
+          sub->recvbuff = (uint8_t*)resources->devShm->zcAddrExchange.receiverRegAddr;
+          resources->devShm->zcAddrExchange.receiverReady = 0;
+          resources->devShm->zcAddrExchange.copyStarted = 0;
+          resources->devShm->zcAddrExchange.copyDone = 0;
+          sub->done = 0;
+          sub->nsteps = 1;
+          readyCnt++;
+        }
+      }
+      if (readyCnt == args->nsubs) {
+        args->done = 0;
+        args->state = ncclProxyOpProgress;
+      } else {
+        args->idle = 1;
+      }
+      return ncclSuccess;
     }
-    args->state = ncclProxyOpProgress;
+    else if (args->state == ncclProxyOpProgress) {
+      for (int s=0; s<args->nsubs; s++) {
+        struct ncclProxySubArgs* sub = args->subs + s;
+        volatile struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*)(sub->connection->transportResources);
+        if (sub->sendbuff && sub->recvbuff && !resources->devShm->zcAddrExchange.copyDone && !resources->devShm->zcAddrExchange.copyStarted) {
+          CUDACHECK(cudaMemcpyAsync(sub->recvbuff, sub->sendbuff, sub->nbytes, cudaMemcpyDeviceToDevice, resources->stream));
+          CUDACHECK(cudaEventRecord(resources->events[0], resources->stream));
+          resources->devShm->zcAddrExchange.copyStarted = 1;
+        }
+        
+        if (resources->devShm->zcAddrExchange.copyStarted && !resources->devShm->zcAddrExchange.copyDone) {
+          cudaError_t res = cudaEventQuery(resources->events[0]);
+          if (res == cudaSuccess) {
+            resources->devShm->zcAddrExchange.copyDone = 1;
+            if (sub->done == 0) {
+              sub->done = 1;
+              args->done++;
+            }
+          } else if (res != cudaErrorNotReady){
+            CUDACHECK(res);
+          }
+        }
+      }
+      if (args->done == args->nsubs) {
+        args->state = ncclProxyOpNone;
+        args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+      } else {
+        args->idle = 1;
+      }
+      return ncclSuccess;
+    }
+    return ncclSuccess;
+  } else {
+    if (args->state == ncclProxyOpReady) {
+      for (int s=0; s<args->nsubs; s++) {
+        struct ncclProxySubArgs* sub = args->subs+s;
+        struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
+        // Round to next multiple of sliceSteps
+        sub->base = ROUNDUP(resources->step, args->chunkSteps);
+        sub->posted = sub->transmitted = sub->done = 0;
+        // psm specific initilization
+        computeChunksize(sub);
+        sub->nsteps=(sub->nbytes + sub->chunkSize - 1) / sub->chunkSize;
+        resources->shm->sendMem.head = sub->base;
+        sub->offset = 0;
+      }
+      args->state = ncclProxyOpProgress;
+    }
+    args->idle = 1;
+    if (args->state == ncclProxyOpProgress) {
+      int p = args->protocol;
+      for (int s=0; s<args->nsubs; s++) {
+        struct ncclProxySubArgs* sub = args->subs+s;
+        struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
+        if (p != NCCL_PROTO_SIMPLE) {
+          WARN("PSM P2P transport only supports SIMPLE protocol, got %d", p);
+          return ncclInternalError;
+        }
+        // psm post stage, copy data from userbuffer to recvFifo(receiver shm)
+        if (sub->transmitted < sub->done + PSM_STEPS && sub->transmitted < sub->nsteps) {
+          int buffSlot = (sub->base + sub->transmitted) % PSM_STEPS;
+          volatile u_int64_t* recvTail = &resources->shm->recvMem.tail;
+          if (*recvTail > sub->base + sub->transmitted) {
+            size_t size = std::min((size_t)sub->chunkSize, sub->nbytes - sub->offset);
+            CUDACHECK(cudaMemcpyAsync(
+                resources->recvFifo + buffSlot * sub->chunkSize,
+                (char*)sub->sendbuff + sub->offset,
+                size,
+                cudaMemcpyDeviceToDevice, 
+                resources->stream));
+            CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
+            
+            sub->transmitted += args->sliceSteps;
+            sub->offset += size;
+          }
+        }
+        // psm transmit stage, notify receiver that data is ready to be received
+        if (sub->done < sub->transmitted) {
+          int buffSlot = (sub->base + sub->done) % PSM_STEPS;
+  
+          cudaError_t res = cudaEventQuery(resources->events[buffSlot]);
+          if (res != cudaErrorNotReady) CUDACHECK(res);
+          if (res == cudaSuccess) {
+            sub->done += args->sliceSteps;
+            // Notify PSM SHM
+            volatile uint64_t* sendHead = &resources->shm->sendMem.head;
+            *sendHead = sub->base + sub->done;
+          }
+          if (sub->done == sub->nsteps) {
+            resources->step = sub->base + sub->nsteps;
+            args->done++;
+          }
+        }
+      }
+      if (args->done == args->nsubs) {
+        args->state = ncclProxyOpNone;
+        args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+      }
+    }
+    return ncclSuccess;
   }
-  args->idle = 1;
-  if (args->state == ncclProxyOpProgress) {
-    int p = args->protocol;
-    for (int s=0; s<args->nsubs; s++) {
-      struct ncclProxySubArgs* sub = args->subs+s;
-      struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
-      if (p != NCCL_PROTO_SIMPLE) {
-        WARN("PSM P2P transport only supports SIMPLE protocol, got %d", p);
-        return ncclInternalError;
-      }
-      // psm post stage, copy data from userbuffer to recvFifo(receiver shm)
-      if (sub->transmitted < sub->done + PSM_STEPS && sub->transmitted < sub->nsteps) {
-        int buffSlot = (sub->base + sub->transmitted) % PSM_STEPS;
-        volatile u_int64_t* recvTail = &resources->shm->recvMem.tail;
-        if (*recvTail > sub->base + sub->transmitted) {
-          size_t size = std::min((size_t)sub->chunkSize, sub->nbytes - sub->offset);
-          CUDACHECK(cudaMemcpyAsync(
-              resources->recvFifo + buffSlot * sub->chunkSize,
-              (char*)sub->sendbuff + sub->offset,
-              size,
-              cudaMemcpyDeviceToDevice, 
-              resources->stream));
-          CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
-          
-          sub->transmitted += args->sliceSteps;
-          sub->offset += size;
-        }
-      }
-      // psm transmit stage, notify receiver that data is ready to be received
-      if (sub->done < sub->transmitted) {
-        int buffSlot = (sub->base + sub->done) % PSM_STEPS;
-
-        cudaError_t res = cudaEventQuery(resources->events[buffSlot]);
-        if (res != cudaErrorNotReady) CUDACHECK(res);
-        if (res == cudaSuccess) {
-          sub->done += args->sliceSteps;
-          // Notify PSM SHM
-          volatile uint64_t* sendHead = &resources->shm->sendMem.head;
-          *sendHead = sub->base + sub->done;
-        }
-        if (sub->done == sub->nsteps) {
-          resources->step = sub->base + sub->nsteps;
-          args->done++;
-        }
-      }
-    }
-    if (args->done == args->nsubs) {
-      args->state = ncclProxyOpNone;
-      args->doneCounter->fetch_sub(args->nsubs);
-    }
-  }
-  return ncclSuccess;
 }
 
 static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(!(args->readyEvent->load(std::memory_order_acquire))) return ncclSuccess;
-  if (args->state == ncclProxyOpReady) {
-    for (int s=0; s<args->nsubs; s++) {
-      struct ncclProxySubArgs* sub = args->subs+s;
-      struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
-      // Round to next multiple of sliceSteps
-      sub->base = ROUNDUP(resources->step, args->chunkSteps);
-      sub->posted = sub->transmitted = sub->done = 0;
-      resources->shm->recvMem.tail = sub->base + PSM_STEPS;
-      computeChunksize(sub);
-      sub->nsteps=(sub->nbytes + sub->chunkSize - 1) / sub->chunkSize;
-      sub->offset = 0;
+  if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+  if (args->reg) {
+    if (args->state == ncclProxyOpReady) {
+      for (int s=0; s<args->nsubs; s++) {
+        struct ncclProxySubArgs* sub = args->subs + s;
+        volatile struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*)(sub->connection->transportResources);
+          resources->devShm->zcAddrExchange.receiverRegAddr = sub->recvbuff;
+          __sync_synchronize();
+          resources->devShm->zcAddrExchange.receiverReady = 1;
+          sub->done = 0;
+          sub->nsteps = 1;
+        }
+        args->done = 0;
+        args->state = ncclProxyOpProgress;
+        return ncclSuccess;
+      }
+      else if (args->state == ncclProxyOpProgress) {
+        for (int s=0; s<args->nsubs; s++) {
+          struct ncclProxySubArgs* sub = args->subs + s;
+          volatile struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*)(sub->connection->transportResources);
+          
+          if (resources->devShm->zcAddrExchange.copyDone == 1 && sub->done == 0) {
+            sub->done = 1;
+            args->done++;
+            resources->devShm->zcAddrExchange.copyDone = 0;
+            resources->devShm->zcAddrExchange.copyStarted = 0;
+          }
+        }
+        if (args->done == args->nsubs) {
+          args->state = ncclProxyOpNone;
+          args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+        } else {
+          args->idle = 1;
+        }
+        return ncclSuccess;
+      }
+      return ncclSuccess;
+  } else {
+    if (args->state == ncclProxyOpReady) {
+      for (int s=0; s<args->nsubs; s++) {
+        struct ncclProxySubArgs* sub = args->subs+s;
+        struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
+        // Round to next multiple of sliceSteps
+        sub->base = ROUNDUP(resources->step, args->chunkSteps);
+        sub->posted = sub->transmitted = sub->done = 0;
+        resources->shm->recvMem.tail = sub->base + PSM_STEPS;
+        computeChunksize(sub);
+        sub->nsteps=(sub->nbytes + sub->chunkSize - 1) / sub->chunkSize;
+        sub->offset = 0;
+      }
+      args->state = ncclProxyOpProgress;
     }
-    args->state = ncclProxyOpProgress;
+    args->idle = 1;
+    if (args->state == ncclProxyOpProgress) {
+      int p = args->protocol;
+      for (int s=0; s<args->nsubs; s++) {
+        struct ncclProxySubArgs* sub = args->subs+s;
+        struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
+  
+        if (p != NCCL_PROTO_SIMPLE) {
+          WARN("PSM P2P transport only supports SIMPLE protocol, got %d", p);
+          return ncclInternalError;
+        }
+        if (sub->transmitted < sub->done + PSM_STEPS && sub->transmitted < sub->nsteps) {
+          int buffSlot = (sub->base + sub->transmitted) % PSM_STEPS;
+          volatile uint64_t* sendHead = &resources->shm->sendMem.head;
+  
+          if ((*sendHead > sub->base + sub->transmitted)) {
+            size_t size = std::min((size_t)sub->chunkSize, sub->nbytes - sub->offset);
+            CUDACHECK(cudaMemcpyAsync(
+                (char*)sub->recvbuff + sub->offset,
+                resources->recvFifo + buffSlot * sub->chunkSize,
+                size,
+                cudaMemcpyDeviceToDevice,
+                resources->stream));
+            CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
+            sub->transmitted += args->sliceSteps;
+            sub->offset += size;
+          }
+        }
+        if (sub->done < sub->transmitted) {
+          int buffSlot = (sub->base + sub->done) % PSM_STEPS;
+          cudaError_t res = cudaEventQuery(resources->events[buffSlot]);
+          if (res != cudaErrorNotReady) CUDACHECK(res);
+          
+          if (res == cudaSuccess) {
+            sub->done += args->sliceSteps;
+            // Notify sender consume data
+            resources->shm->recvMem.tail = sub->base + sub->done + PSM_STEPS;
+          }
+          if (sub->done == sub->nsteps) {
+            resources->step = sub->base + sub->nsteps;
+            args->done++;
+          }
+        }
+      }
+      if (args->done == args->nsubs) {
+        args->state = ncclProxyOpNone;
+        args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+      }
+    }
+    return ncclSuccess;
   }
-  args->idle = 1;
-  if (args->state == ncclProxyOpProgress) {
-    int p = args->protocol;
-    for (int s=0; s<args->nsubs; s++) {
-      struct ncclProxySubArgs* sub = args->subs+s;
-      struct p2pShmProxyInfo* resources = (struct p2pShmProxyInfo*) (sub->connection->transportResources);
-
-      if (p != NCCL_PROTO_SIMPLE) {
-        WARN("PSM P2P transport only supports SIMPLE protocol, got %d", p);
-        return ncclInternalError;
-      }
-      if (sub->transmitted < sub->done + PSM_STEPS && sub->transmitted < sub->nsteps) {
-        int buffSlot = (sub->base + sub->transmitted) % PSM_STEPS;
-        volatile uint64_t* sendHead = &resources->shm->sendMem.head;
-
-        if ((*sendHead > sub->base + sub->transmitted)) {
-          size_t size = std::min((size_t)sub->chunkSize, sub->nbytes - sub->offset);
-          CUDACHECK(cudaMemcpyAsync(
-              (char*)sub->recvbuff + sub->offset,
-              resources->recvFifo + buffSlot * sub->chunkSize,
-              size,
-              cudaMemcpyDeviceToDevice,
-              resources->stream));
-          CUDACHECK(cudaEventRecord(resources->events[buffSlot], resources->stream));
-          sub->transmitted += args->sliceSteps;
-          sub->offset += size;
-        }
-      }
-      if (sub->done < sub->transmitted) {
-        int buffSlot = (sub->base + sub->done) % PSM_STEPS;
-        cudaError_t res = cudaEventQuery(resources->events[buffSlot]);
-        if (res != cudaErrorNotReady) CUDACHECK(res);
-        
-        if (res == cudaSuccess) {
-          sub->done += args->sliceSteps;
-          // Notify sender consume data
-          resources->shm->recvMem.tail = sub->base + sub->done + PSM_STEPS;
-        }
-        if (sub->done == sub->nsteps) {
-          resources->step = sub->base + sub->nsteps;
-          args->done++;
-        }
-      }
-    }
-    if (args->done == args->nsubs) {
-      args->state = ncclProxyOpNone;
-      args->doneCounter->fetch_sub(args->nsubs);
-    }
-  }
-  return ncclSuccess;
 }
 
-static ncclResult_t ipcRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, struct ncclReg* regRecord, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut, bool* isLegacyIpc) {
+static ncclResult_t psmIpcRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, struct ncclReg* regRecord, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut, bool* isLegacyIpc) {
 ncclResult_t ret = ncclSuccess;
   struct ncclIpcRegInfo* newInfo = NULL;
   uintptr_t* peerRmtAddrs = NULL;
@@ -1097,8 +1208,7 @@ fail:
   goto exit;
 }
 
-// ncclResult_t ncclIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut) {
-static ncclResult_t psmIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut) {
+ncclResult_t psmIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut) {
   ncclResult_t ret = ncclSuccess;
   struct ncclReg *regRecord = NULL;
   bool isValid = false;
@@ -1110,7 +1220,7 @@ static ncclResult_t psmIpcLocalRegisterBuffer(ncclComm* comm, const void* userbu
     NCCLCHECKGOTO(ncclRegFind(comm, userbuff, buffSize, &regRecord), ret, fail);
     NCCLCHECKGOTO(ncclRegLocalIsValid(regRecord, &isValid), ret, fail);
     if (isValid)
-      NCCLCHECKGOTO(ipcRegisterBuffer(comm, userbuff, buffSize, peerRanks, nPeers, type, regRecord, regBufFlag, offsetOut, peerRmtAddrsOut, NULL), ret, fail);
+      NCCLCHECKGOTO(psmIpcRegisterBuffer(comm, userbuff, buffSize, peerRanks, nPeers, type, regRecord, regBufFlag, offsetOut, peerRmtAddrsOut, NULL), ret, fail);
   }
 
 exit:
@@ -1150,7 +1260,7 @@ static ncclResult_t psmIpcGraphRegisterBuffer(ncclComm* comm, const void* userbu
   if (comm && userbuff && buffSize > 0 && nPeers > 0) {
     CUCHECKGOTO(cuMemGetAddressRange((CUdeviceptr*)&baseAddr, &baseSize, (CUdeviceptr)userbuff), ret, fail);
     NCCLCHECKGOTO(ncclCommGraphRegister(comm, baseAddr, baseSize, (void**)&regRecord), ret, fail);
-    NCCLCHECKGOTO(ipcRegisterBuffer(comm, userbuff, buffSize, peerRanks, nPeers, type, regRecord, regBufFlag, offsetOut, peerRmtAddrsOut, &isLegacyIpc), ret, fail);
+    NCCLCHECKGOTO(psmIpcRegisterBuffer(comm, userbuff, buffSize, peerRanks, nPeers, type, regRecord, regBufFlag, offsetOut, peerRmtAddrsOut, &isLegacyIpc), ret, fail);
     if (*regBufFlag) {
       struct ncclIpcCleanupCallback* record;
       NCCLCHECKGOTO(ncclCalloc(&record, 1), ret, fail);
@@ -1178,7 +1288,7 @@ fail:
   goto exit;
 }
 
-static ncclResult_t psmIpcDeregBuffer(struct ncclComm* comm, struct ncclIpcRegInfo* regInfo) {
+ncclResult_t psmIpcDeregBuffer(struct ncclComm* comm, struct ncclIpcRegInfo* regInfo) {
   NCCLCHECK(ncclProxyCallBlocking(comm, regInfo->ipcProxyconn, ncclProxyMsgDeregister, &regInfo->impInfo, sizeof(struct ncclIpcImpInfo), NULL, 0));
   INFO(NCCL_REG, "rank %d - IPC deregistered buffer %p peer %d ipc remote buffer %p", comm->rank, regInfo->baseAddr, regInfo->peerRank, regInfo->impInfo.rmtRegAddr);
   return ncclSuccess;

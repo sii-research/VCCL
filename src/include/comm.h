@@ -274,7 +274,6 @@ struct ncclKernelPlan {
 struct psmSyncCondition {
   std::atomic<int> proxyOpCount;    // The total number of proxyOp's that have been enqueued in this plan.
   std::atomic<int> proxyReadyEvent; // Event that proxy thread queries for starting progresssing.
-  bool proxyReadyEventSet;           // true if the proxyReadyEvent has been set
 };
 
 ////////////////////////////////////////////////////////////////////////////////

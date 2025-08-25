@@ -10,7 +10,7 @@
 #include "net.h"
 #include "register.h"
 #include "transport.h"
-
+extern int64_t ncclParamPassSm();
 ncclResult_t ncclRegFind(struct ncclComm* comm, const void* data, size_t size, struct ncclReg** reg) {
   struct ncclRegCache* cache = &comm->regCache;
   uintptr_t pageSize = cache->pageSize;
@@ -105,8 +105,14 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
   if (reg->state & IPC_REG_COMPLETE) {
     for (int i = 0; i < NCCL_MAX_LOCAL_RANKS; ++i)
       if (reg->ipcInfos[i]) {
-        if (ncclIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
-          WARN("rank %d deregister IPC buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
+        if (ncclParamPassSm()) {
+          if(psmIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
+            WARN("rank %d deregister IPC buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
+          }
+        } else {
+          if (ncclIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
+            WARN("rank %d deregister IPC buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
+          }
         }
         free(reg->ipcInfos[i]);
       }

@@ -258,7 +258,6 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
     plan->syncCondition = new psmSyncCondition;
     plan->syncCondition->proxyReadyEvent = 0;
     plan->syncCondition->proxyOpCount= proxyOpCnt;
-    plan->syncCondition->proxyReadyEventSet = false;
   }
   // printPlanProxyOp(comm, plan);
 }
@@ -787,6 +786,7 @@ static ncclResult_t addP2pToPlan(
     int recvRank, void* recvAddr, ssize_t recvBytes,
     struct ncclTaskP2p** p2pTasks
   ) {
+  INFO(NCCL_P2P, "rank[%d] addP2pToPlan: sendRank=%d, sendAddr=%p, sendBytes=%ld, recvRank=%d, recvAddr=%p, recvBytes=%ld", comm->rank, sendRank, sendAddr, sendBytes, recvRank, recvAddr, recvBytes);
   constexpr int connIndex = 1;
   bool selfSend = (sendRank == comm->rank);
   // recv: dir=0, send: dir=1
@@ -942,6 +942,7 @@ static ncclResult_t addP2pToPlan(
     op->pattern = dir ? ncclPatternSend : ncclPatternRecv;
     op->chunkSize = chunkSize[dir];
     op->reg = netRegistered[dir];
+    op->regp = ipcRegistered[dir];
     op->coll = p2pTasks[dir] ? p2pTasks[dir]->func : 0;
     op->task.p2p = p2pTasks[dir];
     op->rank = comm->rank;
@@ -1277,8 +1278,7 @@ static ncclResult_t uploadWork(struct ncclComm* comm, struct ncclKernelPlan* pla
 
 // Add PSM related information to the proxy op.
 static void AddPSMToProxyOp(struct ncclKernelPlan* plan, struct ncclProxyOp* op) {
-  op->readyEvent = &plan->syncCondition->proxyReadyEvent;
-  op->doneCounter = &plan->syncCondition->proxyOpCount;
+  op->syncCond = plan->syncCondition;
 }
 
 static ncclResult_t uploadProxyOps(struct ncclComm* comm, struct ncclKernelPlan* plan) {
@@ -1577,9 +1577,7 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
   };
 
   // TODO: what if plan->kernelspecialized is true?
-  if (ncclParamPassSm() &&
-      plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
-    // Launching a cudaHostFunc() to pass sm.
+  if (ncclParamPassSm() && plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
     CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
     goto do_return;
   }

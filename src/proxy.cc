@@ -418,8 +418,9 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   args->proxyAppendPtr = op->connection->proxyAppendPtr;
 
   // args fields for Pass SM.
-  args->doneCounter = op->doneCounter;
-  args->readyEvent = op->readyEvent;
+  args->syncCond = op->syncCond;
+  // p2p registed, set args->reg to the reg pointer
+  args->reg=op->regp;
   return ncclSuccess;
 }
 
@@ -1189,6 +1190,7 @@ error:
   return res;
 }
 
+extern int64_t ncclParamPassSm();
 // cuMem API support
 // The request/response is sent out-of-band using ncclIpcSocket for this specific command
 ncclResult_t ncclProxyClientGetFdBlocking(struct ncclComm* comm, int proxyRank, void *handle, int* convertedFd) {
@@ -1196,7 +1198,11 @@ ncclResult_t ncclProxyClientGetFdBlocking(struct ncclComm* comm, int proxyRank, 
 
   // Request the allocation of a UDS fd for the handle
   if (comm->gproxyConn[proxyRank].initialized == false) {
-    NCCLCHECKGOTO(ncclProxyConnect(comm, TRANSPORT_P2P, 1, proxyRank, &comm->gproxyConn[proxyRank]), ret, error);
+    if (ncclParamPassSm()) {
+      NCCLCHECKGOTO(ncclProxyConnect(comm, TRANSPORT_PSM_P2P, 1, proxyRank, &comm->gproxyConn[proxyRank]), ret, error);
+    } else {
+      NCCLCHECKGOTO(ncclProxyConnect(comm, TRANSPORT_P2P, 1, proxyRank, &comm->gproxyConn[proxyRank]), ret, error);
+    }
   }
   NCCLCHECKGOTO(ncclProxyCallBlockingUDS(comm, &comm->gproxyConn[proxyRank], ncclProxyMsgGetFd, handle, sizeof(CUmemGenericAllocationHandle), NULL, 0, NULL, convertedFd), ret, error);
 

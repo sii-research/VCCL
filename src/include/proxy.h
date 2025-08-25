@@ -74,6 +74,7 @@ struct ncclProxyOp {
   uint8_t protocol;
   uint8_t algorithm;
   uint8_t reg;
+  uint8_t regp;
   // collnet/p2p/coll buffer reg handles
   void* sendMhandle;
   void* recvMhandle;
@@ -107,9 +108,7 @@ struct ncclProxyOp {
   // ReadyEvent field is queried by proxy progress thread to check if the data is ready to be sent/recv.
   // DoneCounter is used to track the number of completed proxyOps.
   // The lifetime of this counter is beyond the lifetime of the proxyOp.
-  std::atomic<int>* readyEvent;
-  std::atomic<int>* doneCounter;
-
+  struct psmSyncCondition* syncCond;
   struct ncclProxyOp *enqNext;
 };
 
@@ -154,6 +153,7 @@ struct ncclProxySubArgs {
   void* stepEventHandles[NCCL_STEPS];
   size_t transSize;
   uint64_t workCounter;
+  struct psmSyncCondition* syncCond;
 
   void* recvRequestsCache[NCCL_STEPS];
   int recvRequestsSubCount;
@@ -180,6 +180,7 @@ struct ncclProxyArgs {
   uint8_t protocol;
   uint8_t algorithm;
   int state;
+  int reg;
   char* sharedBuff[NCCL_STEPS];
   int sharedSize[NCCL_STEPS];
 
@@ -189,8 +190,7 @@ struct ncclProxyArgs {
   struct ncclProxyArgs* next;
   struct ncclProxyArgs* nextPeer;
   struct ncclProxyArgs** proxyAppendPtr;
-  std::atomic<int>* readyEvent;
-  std::atomic<int>* doneCounter;
+  struct psmSyncCondition* syncCond;
 
   union ncclProxyOpSpecifics specifics;
 };
