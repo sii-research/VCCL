@@ -234,6 +234,13 @@ struct ncclTaskP2p {
   void* eventHandle;
 };
 
+struct psmSelfCopy {
+  psmSelfCopy* next;
+  void* dst;
+  void* src;
+  size_t bytes;
+};
+
 struct ncclKernelPlan {
   // A kernel plan is also a callback that reclaims itself. Hence this must
   // be the first member.
@@ -263,6 +270,7 @@ struct ncclKernelPlan {
   struct ncclIntruQueue<struct ncclTaskP2p, &ncclTaskP2p::next> p2pTaskQueue;
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
   struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
+  struct ncclIntruQueue<struct psmSelfCopy, &psmSelfCopy::next> pscTaskQueue;
 
   // Profiler plugin
   void* groupEventHandle;
@@ -574,6 +582,7 @@ struct ncclComm {
   struct ncclMemoryPool memPool_ncclTaskP2p;
   struct ncclMemoryPool memPool_ncclProxyOp;
   struct ncclMemoryPool memPool_ncclKernelPlan;
+  struct ncclMemoryPool memPool_ncclPsmSelfCopy;
 
   // Next comm in this thread's active ncclGroup[Start|End](). Holds "0x1" when
   // this comm is not yet in a group.

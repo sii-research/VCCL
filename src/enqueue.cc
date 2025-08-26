@@ -1075,17 +1075,17 @@ static ncclResult_t scheduleP2pTasksToPlan(
         ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, send);
         ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, recv);
         comm->planner.nTasksP2p -= 2;
-      } else if (ncclParamPassSm() && (sendRank == comm->rank && send->buff != recv->buff)) {
-        NCCLCHECK(ncclCudaMemcpy((char *)recv->buff, (char *)send->buff, send->bytes));
-        ncclIntruQueueDequeue(&peers[sendRank].sendQueue);
-        ncclIntruQueueDequeue(&peers[recvRank].recvQueue);
-        ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, send);
-        ncclMemoryPoolFree(&comm->memPool_ncclTaskP2p, recv);
-        comm->planner.nTasksP2p -= 2; 
       } else {
         // Ensure room for worst case of one new batch per channel.
         if (!testBudget(budget, plan->nWorkBatches+nChannelsMax, plan->workBytes + sizeof(struct ncclDevWorkP2p))) {
           return ncclSuccess;
+        }
+        if (ncclParamPassSm() && (sendRank == comm->rank && send->buff != recv->buff)) {
+          struct psmSelfCopy* node = ncclMemoryPoolAlloc<struct psmSelfCopy>(&comm->memPool_ncclPsmSelfCopy, &comm->memPermanent);
+          node->dst = recv->buff;
+          node->src = send->buff;
+          node->bytes = send->bytes;
+          ncclIntruQueueEnqueue(&plan->pscTaskQueue, node);
         }
         struct ncclTaskP2p* p2pTasks[2] = { recv, send };
         NCCLCHECK(addP2pToPlan(comm, plan, nChannelsMin, nChannelsMax, round, sendRank, sendBuff, sendBytes, recvRank, recvBuff, recvBytes, p2pTasks));
@@ -1393,6 +1393,13 @@ static ncclResult_t reclaimPlan(struct ncclComm* comm, struct ncclCommCallback* 
     if (res1 != ncclSuccess) result = res1;
   }
   NCCLCHECK(result);
+  // Free psm self copy list
+  struct psmSelfCopy* node = ncclIntruQueueHead(&plan->pscTaskQueue);
+  while (node) {
+    struct psmSelfCopy* next = node->next;
+    ncclMemoryPoolFree(&comm->memPool_ncclPsmSelfCopy, node);
+    node = next;
+  }
   // Free plan struct
   ncclMemoryPoolFree(&comm->memPool_ncclKernelPlan, plan);
   return ncclSuccess;
@@ -1578,6 +1585,11 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
 
   // TODO: what if plan->kernelspecialized is true?
   if (ncclParamPassSm() && plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
+    struct psmSelfCopy* node = ncclIntruQueueHead(&plan->pscTaskQueue);
+    while (node) {
+      CUDACHECKGOTO(cudaMemcpyAsync(node->dst, node->src, node->bytes, cudaMemcpyDeviceToDevice, launchStream), ret, do_return);
+      node = node->next;
+    }
     CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
     goto do_return;
   }
