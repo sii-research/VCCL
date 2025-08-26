@@ -11,7 +11,7 @@
 #include "nccl_common.h"
 #include "device.h"
 
-#define NCCL_MAX_NET_SIZE (1024*1024*1024L) // Rather than send INT_MAX which is 2G-1, send a power of two.
+//#define NCCL_MAX_NET_SIZE (1024*1024*1024L) // Rather than send INT_MAX which is 2G-1, send a power of two.
 
 // CHUNKSIZE must be a multiple of SLICESIZE
 #define ALLREDUCE_SLICESTEPS (NCCL_STEPS/4)
@@ -25,7 +25,8 @@
 #define REDUCE_SLICESTEPS 1
 #define REDUCE_CHUNKSTEPS 1
 #define NCCL_MAX_SLICE_PER_CHUNK 2  // max value for CHUNKSTEPS/SLICESTEPS, must accord with above
-#define NCCL_MAX_NET_SIZE (1024*1024*1024L) // Rather than send INT_MAX which is 2G-1, send a power of two.
+//#define NCCL_MAX_NET_SIZE (1024*1024*1024L) // Rather than send INT_MAX which is 2G-1, send a power of two.
+#define NCCL_MAX_NET_SIZE (512*1024L)
 
 const char* ncclFuncToString(ncclFunc_t op);
 const char* ncclDevRedOpToString(ncclDevRedOp_t op);

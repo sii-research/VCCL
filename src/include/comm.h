@@ -17,6 +17,7 @@
 #include "register.h"
 #include "graph.h"
 #include "profiler.h"
+#include <atomic>
 
 #if CUDART_VERSION < 9000
 struct cudaLaunchParams {
@@ -235,6 +236,13 @@ struct ncclTaskP2p {
   void* eventHandle;
 };
 
+struct psmSelfCopy {
+  psmSelfCopy* next;
+  void* dst;
+  void* src;
+  size_t bytes;
+};
+
 struct ncclKernelPlan {
   // A kernel plan is also a callback that reclaims itself. Hence this must
   // be the first member.
@@ -264,9 +272,18 @@ struct ncclKernelPlan {
   struct ncclIntruQueue<struct ncclTaskP2p, &ncclTaskP2p::next> p2pTaskQueue;
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
   struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
+  struct ncclIntruQueue<struct psmSelfCopy, &psmSelfCopy::next> pscTaskQueue;
 
   // Profiler plugin
   void* groupEventHandle;
+
+  // Used for Pass SM only.
+  struct psmSyncCondition* syncCondition;
+};
+
+struct psmSyncCondition {
+  std::atomic<int> proxyOpCount;    // The total number of proxyOp's that have been enqueued in this plan.
+  std::atomic<int> proxyReadyEvent; // Event that proxy thread queries for starting progresssing.
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -567,6 +584,7 @@ struct ncclComm {
   struct ncclMemoryPool memPool_ncclTaskP2p;
   struct ncclMemoryPool memPool_ncclProxyOp;
   struct ncclMemoryPool memPool_ncclKernelPlan;
+  struct ncclMemoryPool memPool_ncclPsmSelfCopy;
 
   // Next comm in this thread's active ncclGroup[Start|End](). Holds "0x1" when
   // this comm is not yet in a group.

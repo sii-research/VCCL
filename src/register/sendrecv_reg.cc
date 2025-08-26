@@ -1,5 +1,6 @@
 #include "register.h"
 #include "transport.h"
+extern int64_t ncclParamPassSm();
 
 ncclResult_t ncclRegisterP2pNetBuffer(struct ncclComm* comm, void* userbuff, size_t size, struct ncclConnector* conn, int* regFlag, void** handle, struct ncclIntruQueue<struct ncclCommCallback, &ncclCommCallback::next>* cleanupQueue) {
   ncclResult_t ret = ncclSuccess;
@@ -26,7 +27,11 @@ ncclResult_t ncclRegisterP2pIpcBuffer(struct ncclComm* comm, void* userbuff, siz
     ncclIpcGraphRegisterBuffer(comm, userbuff, size, &peerRank, 1, NCCL_IPC_SENDRECV, regFlag, &offset, &peerRmtAddrs, reinterpret_cast<void*>(cleanupQueue), NULL);
   }
   if (*regFlag == 0 && ncclParamLocalRegister()) {
-    ncclIpcLocalRegisterBuffer(comm, userbuff, size, &peerRank, 1, NCCL_IPC_SENDRECV, regFlag, &offset, &peerRmtAddrs);
+    if (ncclParamPassSm()) {
+      psmIpcLocalRegisterBuffer(comm, userbuff, size, &peerRank, 1, NCCL_IPC_SENDRECV, regFlag, &offset, &peerRmtAddrs);
+    } else {
+      ncclIpcLocalRegisterBuffer(comm, userbuff, size, &peerRank, 1, NCCL_IPC_SENDRECV, regFlag, &offset, &peerRmtAddrs);
+    }
   }
 
   if (*regFlag)
