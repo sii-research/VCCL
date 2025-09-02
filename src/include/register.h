@@ -15,7 +15,8 @@ enum {
   NVLS_REG_POSSIBLE = 0x04,
   NVLS_REG_NO_SUPPORT = 0x08,
   COLLNET_REG_COMPLETE = 0x10,
-  IPC_REG_COMPLETE = 0x20
+  IPC_REG_COMPLETE = 0x20,
+  PSM_NET_REG_COMPLETE = 0x1000 // custom flag start from 0x1000
 };
 
 struct ncclPeerRegIpcAddr {
@@ -38,6 +39,8 @@ struct ncclReg {
   uint32_t state;
   // net reg
   struct ncclRegNetHandles* netHandleHead;
+  // psm net reg
+  struct ncclRegNetHandles* psmNetHandleHead;
   // nvls reg
   uintptr_t baseAddr;
   size_t baseSize;

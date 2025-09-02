@@ -1605,7 +1605,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
   return ncclSuccess;
 }
 
-static ncclResult_t psmNetDeregBuffer(struct ncclComm* comm, struct ncclProxyConnector* proxyConn, void* handle) {
+ncclResult_t psmNetDeregBuffer(struct ncclComm* comm, struct ncclProxyConnector* proxyConn, void* handle) {
   NCCLCHECK(ncclProxyCallBlocking(comm, proxyConn, ncclProxyMsgDeregister, &handle, sizeof(void*), NULL, 0));
   INFO(NCCL_REG, "rank %d - deregistered net buffer handle %p", comm->rank, handle);
   return ncclSuccess;
@@ -1623,7 +1623,7 @@ static ncclResult_t netRegisterBuffer(ncclComm* comm, const void* userbuff, size
       bool found = false;
       if (peerConn == NULL) continue;
       peerProxyConn = &peerConn->proxyConn;
-      netHandle = regRecord->netHandleHead;
+      netHandle = regRecord->psmNetHandleHead;
       while (netHandle) {
         if (netHandle->proxyConn == peerProxyConn) {
           found = true;
@@ -1634,7 +1634,7 @@ static ncclResult_t netRegisterBuffer(ncclComm* comm, const void* userbuff, size
       if (found) {
         *outRegBufFlag = 1;
         outHandle[p] = netHandle->handle;
-        INFO(NCCL_REG, "rank %d - NET reuse buffer %p size %ld (baseAddr %p size %ld) handle %p", comm->rank, userbuff, buffSize, (void*)regRecord->addr, regRecord->pages * comm->regCache.pageSize, netHandle->handle);
+        INFO(NCCL_REG, "rank %d - PSM_NET reuse buffer %p size %ld (baseAddr %p size %ld) handle %p", comm->rank, userbuff, buffSize, (void*)regRecord->addr, regRecord->pages * comm->regCache.pageSize, netHandle->handle);
       } else {
         struct netRegInfo info = { regRecord->addr, regRecord->pages * comm->regCache.pageSize };
         void* handle = NULL;
@@ -1643,15 +1643,15 @@ static ncclResult_t netRegisterBuffer(ncclComm* comm, const void* userbuff, size
           NCCLCHECKGOTO(ncclProxyCallBlocking(comm, peerProxyConn, ncclProxyMsgRegister, &info, sizeof(struct netRegInfo), &handle, sizeof(void*)), ret, fail);
           if (handle) {
             struct ncclRegNetHandles* netHandle;
-            regRecord->state |= NET_REG_COMPLETE;
+            regRecord->state |= PSM_NET_REG_COMPLETE;
             NCCLCHECK(ncclCalloc(&netHandle, 1));
             netHandle->handle = handle;
             netHandle->proxyConn = peerProxyConn;
-            netHandle->next = regRecord->netHandleHead;
-            regRecord->netHandleHead = netHandle;
+            netHandle->next = regRecord->psmNetHandleHead;
+            regRecord->psmNetHandleHead = netHandle;
             outHandle[p] = handle;
             *outRegBufFlag = 1;
-            INFO(NCCL_REG, "rank %d - NET register userbuff %p (handle %p), buffSize %ld", comm->rank, userbuff, handle, buffSize);
+            INFO(NCCL_REG, "rank %d - PSM_NET register userbuff %p (handle %p), buffSize %ld", comm->rank, userbuff, handle, buffSize);
           } else {
             goto fail;
           }
@@ -1667,11 +1667,11 @@ exit:
   return ret;
 fail:
   *outRegBufFlag = 0;
-  INFO(NCCL_REG, "rank %d failed to NET register userbuff %p buffSize %ld GDR flag %d", comm->rank, userbuff, buffSize, gdrFlag);
+  INFO(NCCL_REG, "rank %d failed to PSM_NET register userbuff %p buffSize %ld GDR flag %d", comm->rank, userbuff, buffSize, gdrFlag);
   goto exit;
 }
 
-static ncclResult_t psmNetLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle) {
+ncclResult_t psmNetLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, struct ncclConnector** peerConns, int nPeers, int* outRegBufFlag, void** outHandle) {
   ncclResult_t ret = ncclSuccess;
   struct ncclReg *regRecord = NULL;
   bool isValid = false;

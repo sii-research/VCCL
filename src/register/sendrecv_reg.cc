@@ -11,7 +11,11 @@ ncclResult_t ncclRegisterP2pNetBuffer(struct ncclComm* comm, void* userbuff, siz
       ncclNetGraphRegisterBuffer(comm, userbuff, size, &conn, 1, regFlag, handle, cleanupQueue, NULL);
     }
     if (*regFlag == 0 && ncclParamLocalRegister()) {
-      ncclNetLocalRegisterBuffer(comm, userbuff, size, &conn, 1, regFlag, handle);
+      if (ncclParamPassSm()) {
+        psmNetLocalRegisterBuffer(comm, userbuff, size, &conn, 1, regFlag, handle);
+      } else {
+        ncclNetLocalRegisterBuffer(comm, userbuff, size, &conn, 1, regFlag, handle);
+      }
     }
   }
   return ret;

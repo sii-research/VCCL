@@ -91,6 +91,18 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
       free(netHandlePrev);
     }
   }
+  if (reg->state & PSM_NET_REG_COMPLETE) {
+    struct ncclRegNetHandles* netHandle = reg->psmNetHandleHead;
+    struct ncclRegNetHandles* netHandlePrev;
+    while(netHandle) {
+      if (psmNetDeregBuffer(comm, netHandle->proxyConn, netHandle->handle) != ncclSuccess) {
+        WARN("rank %d deregister PSM_NET buffer handle %p proxy rank %d failed\n", comm->rank, netHandle->handle, netHandle->proxyConn->rank);
+      }
+      netHandlePrev = netHandle;
+      netHandle = netHandle->next;
+      free(netHandlePrev);
+    }
+  }
   if (reg->state & NVLS_REG_COMPLETE) {
     if (ncclNvlsDeregBuffer(comm, &reg->mcHandle, reg->regAddr, reg->dev, reg->regUCSize, reg->regMCSize) != ncclSuccess) {
       WARN("rank %d deregister NVLS buffer %p dev %d ucsize %ld mcsize %ld failed", comm->rank, (void*)reg->regAddr, reg->dev, reg->regUCSize, reg->regMCSize);
