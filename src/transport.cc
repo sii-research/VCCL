@@ -30,7 +30,7 @@ static ncclResult_t selectTransport(struct ncclComm* comm, struct ncclTopoGraph*
   struct ncclConnector* connector = (type == 1) ? comm->channels[channelId].peers[peer]->send + connIndex :
                                                   comm->channels[channelId].peers[peer]->recv + connIndex;
   static const int defaultIndex[] = {0, 1, 2, 3};
-  static const int smfreeIndex[]  = {5, 6, 2, 3};
+  static const int smfreeIndex[]  = {5, 1, 6, 3};
 
   const int* indexArray = (ncclParamPassSm() == 1 && connIndex == 1)
                           ? smfreeIndex
