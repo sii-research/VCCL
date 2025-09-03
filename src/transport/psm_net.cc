@@ -170,7 +170,7 @@ static ncclResult_t canConnect(int* ret, struct ncclComm* comm, struct ncclTopoG
   return ncclSuccess;
 }
 
-NCCL_PARAM(PSMP2pNetChunkSize, "PSM_P2P_NET_CHUNKSIZE", (1 << 24)); /* 16 MB */
+NCCL_PARAM(PSMP2pNetChunkSize, "PSM_P2P_NET_CHUNKSIZE", (1 << 22)); /* 4 MB */
 
 // NCCL_PARAM(NetSharedBuffers, "NET_SHARED_BUFFERS", -2);
 // NCCL_PARAM(NetSharedComms, "NET_SHARED_COMMS", 1);
