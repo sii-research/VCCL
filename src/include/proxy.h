@@ -105,10 +105,9 @@ struct ncclProxyOp {
   uint64_t workCounter;
 
   // Data fields for Pass SM NcclTransport type.
-  // ReadyEvent field is queried by proxy progress thread to check if the data is ready to be sent/recv.
-  // DoneCounter is used to track the number of completed proxyOps.
-  // The lifetime of this counter is beyond the lifetime of the proxyOp.
+  // The lifetime of this syncCond is beyond the lifetime of the proxyOp.
   struct psmSyncCondition* syncCond;
+
   struct ncclProxyOp *enqNext;
   unsigned long long ncclFuncTimes;
   int peerRank;

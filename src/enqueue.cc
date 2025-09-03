@@ -249,11 +249,7 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
     ncclIntruQueueEnqueue(&plan->proxyOpQueue, op);
     proxyOpCnt += 1;
   }
-  // TODO: where to recycle the field.
-  // All the modifications to plan are splitted into two parts:
-  // 1. the first part is to prepare Event, which is done in preparePlanForPSM.
-  // 2. the second part is to prepare proxyOpCount, which is done here.
-  // Better to keep the two parts together.
+
   if (ncclParamPassSm()) {
     plan->syncCondition = new psmSyncCondition;
     plan->syncCondition->proxyReadyEvent = 0;
@@ -1592,7 +1588,6 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
     CU_LAUNCH_PARAM_END
   };
 
-  // TODO: what if plan->kernelspecialized is true?
   if (ncclParamPassSm() && plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
     struct psmSelfCopy* node = ncclIntruQueueHead(&plan->pscTaskQueue);
     while (node) {

@@ -426,7 +426,7 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   // args fields for Pass SM.
   args->syncCond = op->syncCond;
   // p2p registed, set args->reg to the reg pointer
-  args->reg=op->regp;
+  args->reg = op->regp;
   return ncclSuccess;
 }
 
