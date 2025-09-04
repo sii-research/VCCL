@@ -11,6 +11,7 @@
 #include "register.h"
 #include "transport.h"
 extern int64_t ncclParamPassSm();
+NCCL_PARAM(PsmForceZeroCopy, "PSM_FORCE_ZEROCOPY", 0);
 ncclResult_t ncclRegFind(struct ncclComm* comm, const void* data, size_t size, struct ncclReg** reg) {
   struct ncclRegCache* cache = &comm->regCache;
   uintptr_t pageSize = cache->pageSize;
@@ -95,8 +96,10 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
     struct ncclRegNetHandles* netHandle = reg->psmNetHandleHead;
     struct ncclRegNetHandles* netHandlePrev;
     while(netHandle) {
-      if (psmNetDeregBuffer(comm, netHandle->proxyConn, netHandle->handle) != ncclSuccess) {
-        WARN("rank %d deregister PSM_NET buffer handle %p proxy rank %d failed\n", comm->rank, netHandle->handle, netHandle->proxyConn->rank);
+      if (!ncclParamPsmForceZeroCopy()) {
+        if (psmNetDeregBuffer(comm, netHandle->proxyConn, netHandle->handle) != ncclSuccess) {
+          WARN("rank %d deregister PSM_NET buffer handle %p proxy rank %d failed\n", comm->rank, netHandle->handle, netHandle->proxyConn->rank);
+        }
       }
       netHandlePrev = netHandle;
       netHandle = netHandle->next;
@@ -127,7 +130,7 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
   }
   if (reg->state & PSM_P2P_REG_COMPLETE) {
     for (int i = 0; i < NCCL_MAX_LOCAL_RANKS; ++i)
-      if (reg->psmIpcInfos[i]) {
+      if (reg->psmIpcInfos[i] && !ncclParamPsmForceZeroCopy()) {
         if (psmIpcDeregBuffer(comm, reg->psmIpcInfos[i]) != ncclSuccess) {
           WARN("rank %d deregister PSM_P2P IPC buffer %p peerRank %d failed", comm->rank, reg->psmIpcInfos[i]->baseAddr, reg->psmIpcInfos[i]->peerRank);
         }
