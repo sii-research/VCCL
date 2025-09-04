@@ -1084,11 +1084,11 @@ ncclResult_t ret = ncclSuccess;
     for (int p = 0; p < nPeers; p++) {
       int peerRank = peerRanks[p];
       peerLocalRank = comm->rankToLocalRank[peerRank];
-      if (regRecord->ipcInfos[peerLocalRank]) {
+      if (regRecord->psmIpcInfos[peerLocalRank]) {
         // We already have IPC info for peerLocalRank, no need to register it, we can reuse it
         *regBufFlag = 1;
-        if (isLegacyIpc) *isLegacyIpc = regRecord->ipcInfos[peerLocalRank]->impInfo.legacyIpcCap;
-        INFO(NCCL_REG, "rank %d - IPC reuse buffer %p size %ld (baseAddr %p size %ld) to peer %d regAddr %p", comm->rank, userbuff, buffSize, (void*)regRecord->addr, regRecord->pages * comm->regCache.pageSize, peerRank, regRecord->ipcInfos[peerLocalRank]->impInfo.rmtRegAddr);
+        if (isLegacyIpc) *isLegacyIpc = regRecord->psmIpcInfos[peerLocalRank]->impInfo.legacyIpcCap;
+        INFO(NCCL_REG, "rank %d - IPC reuse buffer %p size %ld (baseAddr %p size %ld) to peer %d regAddr %p", comm->rank, userbuff, buffSize, (void*)regRecord->addr, regRecord->pages * comm->regCache.pageSize, peerRank, regRecord->psmIpcInfos[peerLocalRank]->impInfo.rmtRegAddr);
       } else {
         // Register buffer with peerLocalRank
         struct ncclProxyConnector* proxyConn = NULL;
@@ -1156,19 +1156,19 @@ ncclResult_t ret = ncclSuccess;
         }
         if (rmtRegAddr) {
           NCCLCHECKGOTO(ncclCalloc(&newInfo, 1), ret, fail);
-          assert(regRecord->ipcInfos[peerLocalRank] == NULL);
-          regRecord->state |= IPC_REG_COMPLETE;
+          assert(regRecord->psmIpcInfos[peerLocalRank] == NULL);
+          regRecord->state |= PSM_P2P_REG_COMPLETE;
           newInfo->peerRank = peerRank;
           newInfo->baseAddr = baseAddr;
           newInfo->impInfo.rmtRegAddr = rmtRegAddr;
           newInfo->impInfo.offset = ipcInfo.offset;
           newInfo->impInfo.legacyIpcCap = ipcInfo.legacyIpcCap;
           newInfo->ipcProxyconn = proxyConn;
-          regRecord->ipcInfos[peerLocalRank] = newInfo;
-          if (regRecord->regIpcAddrs.hostPeerRmtAddrs == NULL) {
-            NCCLCHECKGOTO(ncclCalloc(&regRecord->regIpcAddrs.hostPeerRmtAddrs, comm->localRanks), ret, fail);
+          regRecord->psmIpcInfos[peerLocalRank] = newInfo;
+          if (regRecord->psmRegIpcAddrs.hostPeerRmtAddrs == NULL) {
+            NCCLCHECKGOTO(ncclCalloc(&regRecord->psmRegIpcAddrs.hostPeerRmtAddrs, comm->localRanks), ret, fail);
           }
-          regRecord->regIpcAddrs.hostPeerRmtAddrs[peerLocalRank] = (uintptr_t)rmtRegAddr;
+          regRecord->psmRegIpcAddrs.hostPeerRmtAddrs[peerLocalRank] = (uintptr_t)rmtRegAddr;
           needUpdate = true;
           *regBufFlag = 1;
           INFO(NCCL_REG, "rank %d - IPC registered buffer %p size %ld (baseAddr %p size %ld) to peer %d regAddr %p offsetOut %ld", comm->rank, userbuff, buffSize, (void*)regRecord->addr, ipcInfo.size, peerRank, rmtRegAddr, (uintptr_t)userbuff - regRecord->addr);
@@ -1179,23 +1179,23 @@ ncclResult_t ret = ncclSuccess;
     if (*regBufFlag) {
       if (type == NCCL_IPC_COLLECTIVE) {
         // for collective, store registered remote buffers into dev memory for future reference
-        if (regRecord->regIpcAddrs.devPeerRmtAddrs == NULL || needUpdate) {
+        if (regRecord->psmRegIpcAddrs.devPeerRmtAddrs == NULL || needUpdate) {
           cudaStream_t hostStream, deviceStream;
           NCCLCHECKGOTO(ncclStrongStreamAcquire(ncclCudaGraphNone(), &comm->sharedRes->hostStream, /*concurrent=*/false, &hostStream), ret, fail);
           NCCLCHECKGOTO(ncclStrongStreamAcquire(ncclCudaGraphNone(), &comm->sharedRes->deviceStream, /*concurrent=*/false, &deviceStream), ret, fail);
-          if (regRecord->regIpcAddrs.devPeerRmtAddrs == NULL)
-            NCCLCHECKGOTO(ncclCudaCallocAsync(&regRecord->regIpcAddrs.devPeerRmtAddrs, comm->localRanks, hostStream), ret, fail);
+          if (regRecord->psmRegIpcAddrs.devPeerRmtAddrs == NULL)
+            NCCLCHECKGOTO(ncclCudaCallocAsync(&regRecord->psmRegIpcAddrs.devPeerRmtAddrs, comm->localRanks, hostStream), ret, fail);
           if (needUpdate)
-            NCCLCHECKGOTO(ncclCudaMemcpyAsync(regRecord->regIpcAddrs.devPeerRmtAddrs, regRecord->regIpcAddrs.hostPeerRmtAddrs, comm->localRanks, hostStream), ret, fail);
+            NCCLCHECKGOTO(ncclCudaMemcpyAsync(regRecord->psmRegIpcAddrs.devPeerRmtAddrs, regRecord->psmRegIpcAddrs.hostPeerRmtAddrs, comm->localRanks, hostStream), ret, fail);
           NCCLCHECKGOTO(ncclStreamWaitStream(deviceStream, hostStream, comm->sharedRes->scratchEvent), ret, fail);
           NCCLCHECKGOTO(ncclStrongStreamRelease(ncclCudaGraphNone(), &comm->sharedRes->hostStream, /*concurrent=*/false), ret, fail);
           NCCLCHECKGOTO(ncclStrongStreamRelease(ncclCudaGraphNone(), &comm->sharedRes->deviceStream, /*concurrent=*/false), ret, fail);
         }
-        peerRmtAddrs = regRecord->regIpcAddrs.devPeerRmtAddrs;
+        peerRmtAddrs = regRecord->psmRegIpcAddrs.devPeerRmtAddrs;
       } else {
         assert(nPeers == 1);
         // p2p always returns remote addr here since remote buffer addr is passed in ncclDevWorkP2p struct
-        peerRmtAddrs = (uintptr_t*)regRecord->regIpcAddrs.hostPeerRmtAddrs[peerLocalRank];
+        peerRmtAddrs = (uintptr_t*)regRecord->psmRegIpcAddrs.hostPeerRmtAddrs[peerLocalRank];
       }
       *offsetOut = (uintptr_t)userbuff - regRecord->addr;
       *peerRmtAddrsOut = peerRmtAddrs;

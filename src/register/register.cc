@@ -117,19 +117,24 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
   if (reg->state & IPC_REG_COMPLETE) {
     for (int i = 0; i < NCCL_MAX_LOCAL_RANKS; ++i)
       if (reg->ipcInfos[i]) {
-        if (ncclParamPassSm()) {
-          if(psmIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
-            WARN("rank %d deregister IPC buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
-          }
-        } else {
-          if (ncclIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
-            WARN("rank %d deregister IPC buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
-          }
+        if (ncclIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
+          WARN("rank %d deregister IPC buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
         }
         free(reg->ipcInfos[i]);
       }
     if (reg->regIpcAddrs.hostPeerRmtAddrs) free(reg->regIpcAddrs.hostPeerRmtAddrs);
     if (reg->regIpcAddrs.devPeerRmtAddrs) NCCLCHECK(ncclCudaFree(reg->regIpcAddrs.devPeerRmtAddrs));
+  }
+  if (reg->state & PSM_P2P_REG_COMPLETE) {
+    for (int i = 0; i < NCCL_MAX_LOCAL_RANKS; ++i)
+      if (reg->psmIpcInfos[i]) {
+        if (psmIpcDeregBuffer(comm, reg->psmIpcInfos[i]) != ncclSuccess) {
+          WARN("rank %d deregister PSM_P2P IPC buffer %p peerRank %d failed", comm->rank, reg->psmIpcInfos[i]->baseAddr, reg->psmIpcInfos[i]->peerRank);
+        }
+        free(reg->psmIpcInfos[i]);
+      }
+    if (reg->psmRegIpcAddrs.hostPeerRmtAddrs) free(reg->psmRegIpcAddrs.hostPeerRmtAddrs);
+    if (reg->psmRegIpcAddrs.devPeerRmtAddrs) NCCLCHECK(ncclCudaFree(reg->psmRegIpcAddrs.devPeerRmtAddrs));
   }
   return ncclSuccess;
 }
