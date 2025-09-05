@@ -114,7 +114,7 @@ extern int64_t ncclParamP2pReadEnable();
 extern int64_t ncclParamP2pDirectDisable();
 extern int64_t ncclParamPassSm();
 extern int64_t ncclParamMNNVLEnable();
-NCCL_PARAM(PsmP2pDisable, "PSM_P2P_DISABLE", 0);
+
 /* Convert a PCI busId string into a local cudaDev device index (cf. CUDA_VISIBLE_DEVICES) */
 static int busIdToCudaDev(int64_t busId) {
   int ndev;
@@ -132,13 +132,8 @@ static int busIdToCudaDev(int64_t busId) {
   return -1;
 }
 static int useMemcpy = 0;
-
 /* Determine if two peers can communicate through p2p */
 ncclResult_t psmP2pCanConnect(int* ret, struct ncclComm* comm, struct ncclTopoGraph* graph, struct ncclPeerInfo* info1, struct ncclPeerInfo* info2) {
-  if (ncclParamPsmP2pDisable()) {
-    *ret = 0;
-    return ncclSuccess;
-  }
   // Check topology / p2p level.
   int intermediateRank;
   NCCLCHECK(ncclTopoCheckP2p(comm, comm->topo, info1->rank, info2->rank, ret, NULL, &intermediateRank));
