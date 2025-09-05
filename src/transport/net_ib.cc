@@ -33,8 +33,8 @@ static char ncclIbIfName[MAX_IF_NAME_SIZE+1];
 static union ncclSocketAddress ncclIbIfAddr;
 
 const long long second_to_nanoseconds = 1000000000;
-// If enable, Vccl will try to retransmit data using different RNICs when occuring errors, default is 1.
-const int nccl_fault_tolerance_enable = ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE") ? atoi(ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE")) : 1;
+// If enable, Vccl will try to retransmit data using different RNICs when occuring errors, default is 0.
+const int nccl_fault_tolerance_enable = ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE") ? atoi(ncclGetEnv("NCCL_ENABLE_FAULT_TOLERANCE")) : 0;
 
 long long get_nanoseconds()
 {
