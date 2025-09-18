@@ -52,7 +52,7 @@ PKGTARGET  := $(PKGCONFIGFILE)
 LIBOBJ     := $(LIBSRCFILES:%.cc=$(OBJDIR)/%.o)
 BINOBJ     := $(BINSRCFILES:%.cc=$(OBJDIR)/%.o)
 DEPFILES   := $(LIBOBJ:%.o=%.d) $(BINOBJ:%.o=%.d)
-LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl
+LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl -lmlx5
 INCPLUGIN  := include/plugin
 
 DEVMANIFEST := $(BUILDDIR)/obj/device/manifest

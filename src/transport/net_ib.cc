@@ -23,7 +23,11 @@
 #include <unistd.h>
 #define ENABLE_TIMER 0
 #include "timer.h"
-
+extern "C"
+{
+  int mlx5dv_modify_qp_udp_sport(struct ibv_qp *qp, uint32_t udp_sport);
+  int mlx5dv_modify_qp_lag_port(struct ibv_qp *qp, uint8_t port_num);
+}
 #include "ibvwrap.h"
 #define NET_IB_CC
 #include "timer_log.h"
@@ -1661,7 +1665,7 @@ ib_connect:
     }
   }
   comm->base.nRemDevs = remMeta.ndevs;
-
+  static int channel_loop = 0;
   for (int q = 0; q < comm->base.nqps; q++) {
     struct ncclIbQpInfo* remQpInfo   = remMeta.qpInfo + q;
     struct ncclIbDevInfo* remDevInfo = remMeta.devs + remQpInfo->devIndex;
@@ -1686,7 +1690,8 @@ ib_connect:
     remDevInfo->mtu = std::min(remDevInfo->mtu, ibDev->portAttr.active_mtu);
     NCCLCHECKGOTO(ncclIbRtrQp(qp, &commDev->base.gidInfo, remQpInfo->qpn, remDevInfo, false, remMeta.tc, remMeta.sl), ret, fail);
     NCCLCHECKGOTO(ncclIbRtsQp(qp), ret, fail);
-
+    mlx5dv_modify_qp_lag_port(qp, channel_loop % 2 + 1);
+    channel_loop++;
     memcpy(&comm->base.qps[q].gidInfo, &commDev->base.gidInfo, sizeof(struct ncclIbGidInfo));
     comm->base.qps[q].dest_qp_num = remQpInfo->qpn;
     memcpy(&comm->base.qps[q].info, remDevInfo, sizeof(struct ncclIbDevInfo));
