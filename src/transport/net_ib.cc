@@ -127,6 +127,7 @@ NCCL_PARAM(IbAdaptiveRouting, "IB_ADAPTIVE_ROUTING", -2);
 NCCL_PARAM(IbFifoTc, "IB_FIFO_TC", -1);
 NCCL_PARAM(IbAsyncEvents,"IB_RETURN_ASYNC_EVENTS",1);
 NCCL_PARAM(IbEceEnable,"IB_ECE_ENABLE",1);
+NCCL_PARAM(BondLoadBalance, "BOND_LOAD_BALANCE", 0);
 
 static ncclResult_t ncclIbStatsInit(struct ncclIbStats* stat) {
   __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
@@ -1690,8 +1691,10 @@ ib_connect:
     remDevInfo->mtu = std::min(remDevInfo->mtu, ibDev->portAttr.active_mtu);
     NCCLCHECKGOTO(ncclIbRtrQp(qp, &commDev->base.gidInfo, remQpInfo->qpn, remDevInfo, false, remMeta.tc, remMeta.sl), ret, fail);
     NCCLCHECKGOTO(ncclIbRtsQp(qp), ret, fail);
-    mlx5dv_modify_qp_lag_port(qp, channel_loop % 2 + 1);
-    channel_loop++;
+    if (ncclParamBondLoadBalance()) {
+      mlx5dv_modify_qp_lag_port(qp, channel_loop % 2 + 1);
+      channel_loop++;
+    }
     memcpy(&comm->base.qps[q].gidInfo, &commDev->base.gidInfo, sizeof(struct ncclIbGidInfo));
     comm->base.qps[q].dest_qp_num = remQpInfo->qpn;
     memcpy(&comm->base.qps[q].info, remDevInfo, sizeof(struct ncclIbDevInfo));
