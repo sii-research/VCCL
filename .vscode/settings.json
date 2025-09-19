@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "cstring": "cpp",
+        "cinttypes": "cpp",
+        "cassert": "cpp",
+        "deque": "cpp",
+        "cmath": "cpp",
+        "cstddef": "cpp"
+    }
+}

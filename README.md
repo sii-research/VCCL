@@ -23,7 +23,9 @@ VCCL redefines the GPU communication experience with three core capabilities: **
   Inspired by the **DPDK** design philosophy, VCCL introduces a **“DPDK-Like P2P” high-performance scheduling mechanism**, ensuring that GPUs remain fully utilized.  
   In the early days of high-speed networking on CPUs, achieving 10Gbps network performance was nearly impossible due to kernel stack overhead (multiple memory copies, interrupt handling inefficiencies). DPDK solved this by leveraging **hugepage memory + zero-copy** and moving the data path from kernel space to user space.  
   Similarly, current CUDA still faces limitations in communication/computation scheduling and API granularity (public sources note that ~20 out of 132 SMs on the H800 GPU are reserved for communication). VCCL adopts an analogous optimization strategy: **offloading communication tasks from GPU CUDA stack to the CPU side**, combined with **zero-copy** and **global load balancing across pipeline parallel workflows (PP)**.  
-  In **training dense models with hundreds of billions of parameters**, our internal benchmarks show that **cluster-wide training compute efficiency improves by ~2% compared to state-of-the-art baselines** ([More about use zerocopy for training](https://vccl-doc.readthedocs.io/en/latest/usage/training/)).
+  In **training dense models with hundreds of billions of parameters**, our internal benchmarks show that **cluster-wide training compute efficiency improves by ~2% compared to state-of-the-art baselines** ([More about use zerocopy for training](https://vccl-doc.readthedocs.io/en/latest/features/sm-free-overlap/)).
+  
+  Note: The SM-Free mode currently does not support fault tolerance or telemetry; this is planned as future work.
 
 - **High Availability**  
   Provides a **lightweight local recovery fault-tolerance mechanism** that effectively handles **NIC failures and switch faults** without significantly increasing system overhead. In practice, this reduces overall training interruption rates by **over 50%** ([More about fault tolerance](https://vccl-doc.readthedocs.io/en/latest/features/fault-tolerance/)).

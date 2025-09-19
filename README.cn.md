@@ -20,7 +20,8 @@ VCCL 以**高效率、高可用、高可视**三大核心能力，重塑 GPU 通
   借鉴 DPDK 的设计理念，VCCL 引入 “DPDK-Like P2P” 高性能调度，让 GPU 尽可能保持满载：  
   早期在 CPU 侧实现万兆网络的用户态高速数据面，需要通过**大页内存 + 零拷贝**并将数据通路从**内核态迁移到用户态**，以绕开协议栈多次拷贝和中断开销。  
   类比之下，当前 CUDA 在通信/计算调度与 API 颗粒度方面仍有限制（公开资料亦提到 H800 的 132 个 SM 中会预留约 20 个用于通信）。VCCL 的做法与 DPDK 优化内核路径类似：**通过智能调度将通信任务从 GPU CUDA 栈卸载到 CPU 侧**，联合**零拷贝**与 **PP 工作流的全局负载均衡**，显著缩短 GPU 空闲时间。  
-  在**千亿参数 Dense 模型训练**中，我们的内部对比结果显示：**整网训练算力利用率在 SOTA 之上再提升约 2%**（环境可复现，见[示例说明](https://vccl-doc.readthedocs.io/en/latest/usage/training/)）。
+  在**千亿参数 Dense 模型训练**中，我们的内部对比结果显示：**整网训练算力利用率在 SOTA 之上再提升约 2%**（环境可复现，见[示例说明](https://vccl-doc.readthedocs.io/en/latest/features/sm-free-overlap/)）。
+  Ps:无核现在还不支持容错和telemetry，后续工作之一。
 
 - **高可用（High Availability）**  
   提供**轻量级本地恢复**容错([Fault Tolerance](https://vccl-doc.readthedocs.io/en/latest/features/fault-tolerance/))机制，在不显著增加系统负担的前提下，有效应对**网口 Down / 交换机故障**等引发的训练中断，整体故障率可**降低超过 50%**。

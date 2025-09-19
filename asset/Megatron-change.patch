@@ -1,0 +1,368 @@
+diff --git a/megatron/core/pipeline_parallel/p2p_communication.py b/megatron/core/pipeline_parallel/p2p_communication.py
+index 17f1a44c..21458306 100644
+--- a/megatron/core/pipeline_parallel/p2p_communication.py
++++ b/megatron/core/pipeline_parallel/p2p_communication.py
+@@ -125,33 +125,72 @@ def _batched_p2p_ops(
+     group: torch.distributed.ProcessGroup,
+     prev_pipeline_rank: int,
+     next_pipeline_rank: int,
++    config: Optional[ModelParallelConfig] = None,
+ ):
+     ops = []
+-    if tensor_send_prev is not None:
+-        send_prev_op = torch.distributed.P2POp(
+-            torch.distributed.isend, tensor_send_prev, prev_pipeline_rank, group
+-        )
+-        ops.append(send_prev_op)
+-    if tensor_recv_prev is not None:
+-        recv_prev_op = torch.distributed.P2POp(
+-            torch.distributed.irecv, tensor_recv_prev, prev_pipeline_rank, group
+-        )
+-        ops.append(recv_prev_op)
+-    if tensor_send_next is not None:
+-        send_next_op = torch.distributed.P2POp(
+-            torch.distributed.isend, tensor_send_next, next_pipeline_rank, group
+-        )
+-        ops.append(send_next_op)
+-    if tensor_recv_next is not None:
+-        recv_next_op = torch.distributed.P2POp(
+-            torch.distributed.irecv, tensor_recv_next, next_pipeline_rank, group
+-        )
+-        ops.append(recv_next_op)
++    req_keys = []
++    if get_pipeline_model_parallel_rank() % 2 == 0:
++        if tensor_send_prev is not None:
++            send_prev_op = torch.distributed.P2POp(
++                torch.distributed.isend, tensor_send_prev, prev_pipeline_rank, group
++            )
++            ops.append(send_prev_op)
++            req_keys.append("send_prev")
++        if tensor_recv_prev is not None:
++            recv_prev_op = torch.distributed.P2POp(
++                torch.distributed.irecv, tensor_recv_prev, prev_pipeline_rank, group
++            )
++            ops.append(recv_prev_op)
++            req_keys.append("recv_prev")
++        if tensor_send_next is not None:
++            send_next_op = torch.distributed.P2POp(
++                torch.distributed.isend, tensor_send_next, next_pipeline_rank, group
++            )
++            ops.append(send_next_op)
++            req_keys.append("send_next")
++        if tensor_recv_next is not None:
++            recv_next_op = torch.distributed.P2POp(
++                torch.distributed.irecv, tensor_recv_next, next_pipeline_rank, group
++            )
++            ops.append(recv_next_op)
++            req_keys.append("recv_next")
++    else:
++        if tensor_recv_prev is not None:
++            recv_prev_op = torch.distributed.P2POp(
++                torch.distributed.irecv, tensor_recv_prev, prev_pipeline_rank, group
++            )
++            ops.append(recv_prev_op)
++            req_keys.append("recv_prev")
++        if tensor_send_prev is not None:
++            send_prev_op = torch.distributed.P2POp(
++                torch.distributed.isend, tensor_send_prev, prev_pipeline_rank, group
++            )
++            ops.append(send_prev_op)
++            req_keys.append("send_prev")
++        if tensor_recv_next is not None:
++            recv_next_op = torch.distributed.P2POp(
++                torch.distributed.irecv, tensor_recv_next, next_pipeline_rank, group
++            )
++            ops.append(recv_next_op)
++            req_keys.append("recv_next")
++        if tensor_send_next is not None:
++            send_next_op = torch.distributed.P2POp(
++                torch.distributed.isend, tensor_send_next, next_pipeline_rank, group
++            )
++            ops.append(send_next_op)
++            req_keys.append("send_next")
+     if len(ops) > 0:
+         reqs = torch.distributed.batch_isend_irecv(ops)
+     else:
+         reqs = []
+-    return reqs
++    if config.overlap_p2p_comm:
++        dict_reqs = {}
++        for key in req_keys:
++           dict_reqs[key] = reqs[0]
++
++        return dict_reqs
++    else:
++        return reqs
+ 
+ 
+ def _p2p_ops(
+@@ -332,7 +371,8 @@ def _communicate(
+ 
+         p2p_func = _ring_exchange_wrapper
+     elif config.batch_p2p_comm:
+-        assert wait_on_reqs
++        # will lead to performance degradation if wait_on_reqs is True with batch_p2p_comm & overlap_p2p_comm enabled.
++        #assert wait_on_reqs
+         p2p_func = _batched_p2p_ops
+     else:
+         p2p_func = _p2p_ops
+@@ -352,7 +392,7 @@ def _communicate(
+         assert not isinstance(prev_rank, list)
+         prev_rank = [prev_rank]
+ 
+-    if config.use_ring_exchange_p2p or config.batch_p2p_comm:
++    if config.use_ring_exchange_p2p or (config.batch_p2p_comm and not config.overlap_p2p_comm):
+         reqs = []
+     else:
+         reqs = {}
+@@ -371,21 +411,31 @@ def _communicate(
+             tensor_recv_next_list.append(tensor_recv_next)
+         else:
+             tensor_recv_next = None
+-
+-        p2p_reqs = p2p_func(
+-            tensor_send_prev=tensor_send_prev,
+-            tensor_recv_prev=tensor_recv_prev,
+-            tensor_send_next=tensor_send_next,
+-            tensor_recv_next=tensor_recv_next,
+-            group=group,
+-            prev_pipeline_rank=pr,
+-            next_pipeline_rank=nr,
+-        )
++        if config.batch_p2p_comm and config.overlap_p2p_comm:
++            p2p_reqs = p2p_func(
++                tensor_send_prev=tensor_send_prev,
++                tensor_recv_prev=tensor_recv_prev,
++                tensor_send_next=tensor_send_next,
++                tensor_recv_next=tensor_recv_next,
++                group=group,
++                prev_pipeline_rank=pr,
++                next_pipeline_rank=nr,
++                config = config,
++            )
++        else:
++            p2p_reqs = p2p_func(
++                tensor_send_prev=tensor_send_prev,
++                tensor_recv_prev=tensor_recv_prev,
++                tensor_send_next=tensor_send_next,
++                tensor_recv_next=tensor_recv_next,
++                group=group,
++                prev_pipeline_rank=pr,
++                next_pipeline_rank=nr,
++            )
+         if isinstance(p2p_reqs, list):
+             reqs.extend(p2p_reqs)
+         else:
+             reqs.update(p2p_reqs)
+-
+     if wait_on_reqs and len(reqs) > 0:
+         for req in reqs if isinstance(reqs, list) else reqs.values():
+             req.wait()
+@@ -400,7 +450,7 @@ def _communicate(
+     ):
+         # To protect against race condition when using batch_isend_irecv().
+         # User should assert that we have a modern enough PyTorch to not need this
+-        torch.cuda.synchronize()
++        pass #torch.cuda.synchronize()
+ 
+     def _handle_tensor_list(x):
+         """This basically handles all the cases that we expect to see. Either the list None,
+@@ -422,7 +472,8 @@ def _communicate(
+ 
+     tensor_recv_prev = _handle_tensor_list(tensor_recv_prev_list)
+     tensor_recv_next = _handle_tensor_list(tensor_recv_next_list)
+-
++    #if torch.distributed.get_rank() == 0:
++    #   print(f'updated requested: {reqs}')
+     return tensor_recv_prev, tensor_recv_next, reqs
+ 
+ 
+diff --git a/megatron/core/pipeline_parallel/schedules.py b/megatron/core/pipeline_parallel/schedules.py
+index 317789ad..8bce9cdb 100644
+--- a/megatron/core/pipeline_parallel/schedules.py
++++ b/megatron/core/pipeline_parallel/schedules.py
+@@ -716,8 +716,7 @@ def forward_backward_pipelining_with_interleaving(
+     # Their corresponding index variables are
+     # microbatch_id in [0, num_microbatches)
+     # model_chunk_id in [0, num_model_chunks)
+-    # virtual_microbatch_id in [0, total_num_microbatches)
+-
++    # virtual_microbatch_id in [0, total_num_microbatches) 
+     assert isinstance(model, list), "interleaved pipeline parallelism expected model chunking"
+     assert all(isinstance(chunk, torch.nn.Module) for chunk in model), "invalid model chunking"
+     assert isinstance(
+@@ -728,8 +727,10 @@ def forward_backward_pipelining_with_interleaving(
+     ), "adjust_tensor_shapes_fn is not supported for interleaved pipeline parallelism"
+ 
+     config = get_model_config(model[0])
+-    if config.overlap_p2p_comm and config.batch_p2p_comm:
+-        raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
++    # With NCCL register userbuffer enabled under SM-free send/recv mode, should allow 
++    # both overlap_p2p_comm and batch_p2p_comm to be true. 
++    #if config.overlap_p2p_comm and config.batch_p2p_comm:
++    #    raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
+ 
+     # Needed only when gradients are finalized in M-Core
+     if config.finalize_model_grads_func is not None and not forward_only:
+@@ -1107,7 +1108,6 @@ def forward_backward_pipelining_with_interleaving(
+     input_tensors[0].append(
+         p2p_communication.recv_forward(tensor_shape, config, is_vp_first_stage(vp_stage=0))
+     )
+-
+     fwd_wait_handles = None
+     fwd_wait_recv_handles = None
+     bwd_wait_handles = None
+@@ -1130,14 +1130,13 @@ def forward_backward_pipelining_with_interleaving(
+     send_next_wait_handle = None
+     send_prev_wait_handle = None
+     recv_next_wait_handles = []
+-
+     for k in range(num_warmup_microbatches):
+         cur_model_chunk_id = get_model_chunk_id(k, forward=True)
+ 
+         if config.overlap_p2p_comm_warmup_flush:
+             if not is_vp_first_stage(vp_stage=cur_model_chunk_id) and k != 0:
+                 assert recv_prev_wait_handles, (
+-                    f'pp rank {pipeline_parallel_rank}, iteration {k},'
++                        f'pp rank {pipeline_parallel_rank}, rank: {torch.distributed.get_rank()} iteration {k},'
+                     'should have registered recv handle'
+                 )
+                 recv_prev_wait_handle = recv_prev_wait_handles.pop(0)
+@@ -1149,7 +1148,6 @@ def forward_backward_pipelining_with_interleaving(
+         # No receive in last iteration when recv iteration k+1.
+         if k == (total_num_microbatches - 1):
+             recv_prev = False
+-
+         # Prefetch recv for iteration k+1 for non-first ranks.
+         if config.overlap_p2p_comm_warmup_flush and not parallel_state.is_pipeline_first_stage(
+             ignore_virtual=True
+@@ -1175,10 +1173,8 @@ def forward_backward_pipelining_with_interleaving(
+             )
+         else:
+             checkpoint_activations_microbatch = None
+-
+         microbatch_id = get_microbatch_id_in_model_chunk(k, forward=True)
+         output_tensor = forward_step_helper(k, microbatch_id, checkpoint_activations_microbatch)
+-
+         # Don't send tensor downstream if on last stage.
+         if is_vp_last_stage(vp_stage=cur_model_chunk_id):
+             output_tensor = None
+@@ -1242,7 +1238,6 @@ def forward_backward_pipelining_with_interleaving(
+                 )
+                 if "recv_prev" in fwd_wait_handles:
+                     recv_prev_wait_handles.append(fwd_wait_handles.pop("recv_prev"))
+-
+             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+             if recv_prev:
+                 input_tensors[next_forward_model_chunk_id].append(
+@@ -1283,8 +1278,8 @@ def forward_backward_pipelining_with_interleaving(
+ 
+                 if recv_next:
+                     output_tensor_grads[num_model_chunks - 1].append(bwd_recv_buffer[-1])
++    
+     nvtx_range_pop(suffix="warmup")
+-
+     # Run 1F1B in steady state.
+     nvtx_range_push(suffix="steady")
+     for k in range(num_microbatches_remaining):
+@@ -1317,11 +1312,9 @@ def forward_backward_pipelining_with_interleaving(
+                         recv_prev_wait_handle.wait()
+ 
+             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+-
+             output_tensor = forward_step_helper(
+                 forward_k, microbatch_id, checkpoint_activations_microbatch
+             )
+-
+             # Determine if current stage has anything to send in either direction,
+             # otherwise set tensor to None.
+             forward_model_chunk_id = get_model_chunk_id(forward_k, forward=True)
+@@ -1351,6 +1344,7 @@ def forward_backward_pipelining_with_interleaving(
+                 )
+             )
+             if send_next_wait_handle is not None:
++                # pass 
+                 send_next_wait_handle.wait()
+             if fwd_wait_handles is not None:
+                 send_next_wait_handle = (
+@@ -1375,7 +1369,7 @@ def forward_backward_pipelining_with_interleaving(
+                     if recv_next_wait_handles is not None and recv_next_wait_handles:
+                         recv_next_wait_handle = recv_next_wait_handles.pop(0)
+                         recv_next_wait_handle.wait()
+-
++         
+             input_tensor_grad = backward_step_helper(backward_k)
+ 
+             # First virtual stage no activation gradient tensor to send.
+@@ -1385,7 +1379,6 @@ def forward_backward_pipelining_with_interleaving(
+             recv_next, next_backward_model_chunk_id = recv_tensor_from_previous_stage(
+                 backward_k, forward=False
+             )
+-
+             (bwd_recv_buffer[backward_k % bwd_recv_buffer_size], bwd_wait_handles) = (
+                 p2p_communication.send_backward_recv_backward(
+                     input_tensor_grad,
+@@ -1396,7 +1389,8 @@ def forward_backward_pipelining_with_interleaving(
+                 )
+             )
+             if send_prev_wait_handle is not None:
+-                send_prev_wait_handle.wait()
++               # pass 
++               send_prev_wait_handle.wait()
+             if bwd_wait_handles is not None:
+                 send_prev_wait_handle = (
+                     bwd_wait_handles.pop("send_prev") if "send_prev" in bwd_wait_handles else None
+@@ -1474,7 +1468,6 @@ def forward_backward_pipelining_with_interleaving(
+     deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+     nvtx_range_pop(suffix="steady")
+ 
+-    # Run cooldown backward passes (flush out pipeline) for the last model chunk.
+     nvtx_range_push(suffix="cooldown")
+     curr_vp_stage = config.virtual_pipeline_model_parallel_size - 1
+     if not forward_only:
+@@ -1528,7 +1521,6 @@ def forward_backward_pipelining_with_interleaving(
+ 
+                 if bwd_wait_recv_handles:
+                     recv_next_wait_handles.append(bwd_wait_recv_handles.pop("recv_next"))
+-
+             input_tensor_grad = backward_step_helper(k)
+ 
+             # First virtual stage no activation gradient tensor to send.
+diff --git a/megatron/training/arguments.py b/megatron/training/arguments.py
+index 7b1b35b1..61214c29 100644
+--- a/megatron/training/arguments.py
++++ b/megatron/training/arguments.py
+@@ -104,11 +104,9 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
+             "Yaml config is not supported with legacy models."
+         args = load_yaml(args.yaml_cfg)
+ 
+-
+     # Args from environment
+     args.rank = int(os.getenv('RANK', '0'))
+     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
+-
+     # Args to disable MSC
+     if not args.enable_msc:
+         MultiStorageClientFeature.disable()
+@@ -1129,7 +1127,8 @@ def core_transformer_config_from_args(args, config_class=None):
+     kw_args['layernorm_epsilon'] = args.norm_epsilon
+     kw_args['deallocate_pipeline_outputs'] = True
+     kw_args['pipeline_dtype'] = args.params_dtype
+-    kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm
++    # should allow batch_p2p_comm to go with overlap_p2p_comm under sm-free mode
++    #kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm
+     kw_args['num_moe_experts'] = args.num_experts
+     kw_args['rotary_interleaved'] = args.rotary_interleaved
+     kw_args['num_layers_in_first_pipeline_stage']= args.decoder_first_pipeline_num_layers
+@@ -2284,6 +2283,11 @@ def _add_distributed_args(parser):
+     group.add_argument('--no-overlap-p2p-communication', action='store_false',
+                        help='overlap pipeline parallel communication with forward and backward chunks in 1F1B',
+                        dest='overlap_p2p_comm')
++    # make batch_p2p_comm confiugrable
++    group.add_argument('--batch-p2p-communication', action='store_true',
++                       default=False, help='if set, P2P communication will be put into one batch',
++                       dest='batch_p2p_comm')
++
+     group.add_argument('--overlap-p2p-communication-warmup-flush', action='store_true',
+                        default=False, help='if set, overlap pipeline parallel communication in warmup and flush',
+                        dest='overlap_p2p_comm_warmup_flush')
