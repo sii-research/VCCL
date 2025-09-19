@@ -28,7 +28,7 @@ VCCL redefines the GPU communication experience with three core capabilities: **
   Note: The SM-Free mode currently does not support fault tolerance or telemetry; this is planned as future work.
 
 - **High Availability**  
-  Provides a **lightweight local recovery fault-tolerance mechanism** that effectively handles **NIC failures and switch faults** without significantly increasing system overhead. In practice, this reduces overall training interruption rates by **over 50%** ([More about fault tolerance](https://vccl-doc.readthedocs.io/en/latest/features/fault-tolerance/)).
+  Provides a **lightweight local recovery fault-tolerance mechanism** that effectively handles **NIC failures and switch faults** without significantly increasing system overhead. Concretly, when link fail occurs, VCCL can migrades the traffic within one iteration by **creating a backup QP**. Simultaneously, VCCL supports **seamless traffic recovery to the primary QP** once link integrity is re-established. In practice, this reduces overall training interruption rates by **over 50%** ([More about fault tolerance](https://vccl-doc.readthedocs.io/en/latest/features/fault-tolerance/)).
 
 - **High Visibility**  
   Offers **microsecond-level sliding-window flow telemetry**, enabling efficient bottleneck localization and **congestion detection** for performance tuning([More about flow telemetry](https://vccl-doc.readthedocs.io/en/latest/features/flow-telemetry/)).
