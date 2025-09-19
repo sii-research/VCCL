@@ -4,10 +4,10 @@
 <h1 align="center">VCCL: Venus Collective Communication Library</h1>
 
 <p align="center">
-  <a href="https://example.com/paper">📄 Paper</a> | 
+  <a href="asset/VCCL.pdf">📄 Paper</a> | 
   <a href="https://vccl-doc.readthedocs.io/">📚 Documentation</a> | 
   <a href="https://discord.gg/VBwk5PuY"><img src="asset/discord.svg" width="16" height="16" style="vertical-align: middle;"> Discord</a> | 
-  <a href="asset/QRcode.jpeg"><img src="asset/wechat.svg" width="16" height="16" style="vertical-align: middle;"> WeChat Group</a> | 
+  <a href="asset/wechat_fig.png"><img src="asset/wechat.svg" width="16" height="16" style="vertical-align: middle;"> WeChat Group</a> | 
   <a href="README.cn.md">🇨🇳 中文</a>
 </p>
 

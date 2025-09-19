@@ -4,10 +4,10 @@
 <h1 align="center">VCCL: Venus Collective Communication Library</h1>
 
 <p align="center">
-  <a href="https://example.com/paper">📄 论文</a> | 
+  <a href="asset/VCCL.pdf">📄 论文</a> | 
   <a href="https://vccl-doc.readthedocs.io/">📚 技术文档</a> | 
   <a href="https://discord.gg/VBwk5PuY"><img src="asset/discord.svg" width="16" height="16" style="vertical-align: middle;"> Discord</a> | 
-  <a href="asset/QRcode.jpeg"><img src="asset/wechat.svg" width="16" height="16" style="vertical-align: middle;"> 微信交流群</a> | 
+  <a href="asset/wechat_fig.png"><img src="asset/wechat.svg" width="16" height="16" style="vertical-align: middle;"> 微信交流群</a> | 
   <a href="README.md">🇺🇸 English</a>
 </p>
 VCCL 是一款面向 GPU 的集合通信库，提供 all-reduce、all-gather、reduce、broadcast、reduce-scatter 以及通用 send/recv 通信原语。兼容 PCIe、NVLink、NVSwitch，并支持通过 InfiniBand Verbs 或 TCP/IP 套接字进行跨节点通信；适配单机/多机、多进程（如 MPI）或单进程应用。
