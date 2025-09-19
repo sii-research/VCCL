@@ -24,7 +24,7 @@ VCCL 以**高效率、高可用、高可视**三大核心能力，重塑 GPU 通
   Ps:无核现在还不支持容错和telemetry，后续工作之一。
 
 - **高可用（High Availability）**  
-  提供**轻量级本地恢复**容错([Fault Tolerance](https://vccl-doc.readthedocs.io/en/latest/features/fault-tolerance/))机制，在不显著增加系统负担的前提下，有效应对**网口 Down / 交换机故障**等引发的训练中断，整体故障率可**降低超过 50%**。
+  提供**轻量级本地恢复**容错([Fault Tolerance](https://vccl-doc.readthedocs.io/en/latest/features/fault-tolerance/))机制，在不显著增加系统负担的前提下，有效应对**网口 Down / 交换机故障**等引发的训练中断。具体而言，VCCL通过创建备份QP的方式来实现链路故障后的流量切换，同时，VCCL支持当链路状态恢复后无感的流量切回。整体故障率可**降低超过 50%**。
 
 - **高可视（High Visibility）**  
   提供**微秒级滑动窗口**的通信流量可观测([Flow Telemetry](https://vccl-doc.readthedocs.io/en/latest/features/flow-telemetry/))，助力研发调优与**拥塞检测**。
