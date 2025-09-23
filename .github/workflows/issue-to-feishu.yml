@@ -9,8 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Build Feishu card payload
+        env:
+          LABELS: ${{ join(github.event.issue.labels.*.name, ', ') }}
         run: |
-          cat > payload.json <<'EOF'
+          cat > payload.json <<EOF
           {
             "msg_type": "interactive",
             "card": {
@@ -24,26 +26,25 @@ jobs:
                             "content": "**${{ github.event.issue.title }}**\n作者：${{ github.event.issue.user.login }}\n状态：${{ github.event.issue.state }}" } },
                 { "tag": "div",
                   "text": { "tag": "lark_md",
-                            "content": "👉 [在 GitHub 打开](${{ github.event.issue.html_url }})" } }
+                            "content": "👉 [在 GitHub 打开](${{ github.event.issue.html_url }})" } },
+                { "tag": "div",
+                  "text": { "tag": "lark_md",
+                            "content": "标签：$LABELS" } }
               ]
             }
           }
           EOF
-          # 追加标签信息（若有）
-          jq '.card.elements += [{"tag":"div","text":{"tag":"lark_md","content":"标签：${{ join(github.event.issue.labels.*.name, ", ") }}"}}]' payload.json \
-            > payload2.json || cp payload.json payload2.json
-          mv payload2.json payload.json
 
       - name: Add optional signature (if FEISHU_SIGNKEY is set)
-        if: ${{ secrets.FEISHU_SIGNKEY != '' }}
+        if: ${{ secrets.FEISHU_SIGNKEY }}
         env:
           SIGNKEY: ${{ secrets.FEISHU_SIGNKEY }}
         run: |
           TS=$(date +%s)
           STRING_TO_SIGN="$TS\n$SIGNKEY"
           SIGN=$(printf "$STRING_TO_SIGN" | openssl dgst -sha256 -hmac "$SIGNKEY" -binary | base64)
-          jq --arg ts "$TS" --arg sign "$SIGN" '. + {timestamp:$ts, sign:$sign}' payload.json > payload3.json
-          mv payload3.json payload.json
+          jq --arg ts "$TS" --arg sign "$SIGN" '. + {timestamp:$ts, sign:$sign}' payload.json > payload2.json
+          mv payload2.json payload.json
 
       - name: Send to Feishu
         env:
