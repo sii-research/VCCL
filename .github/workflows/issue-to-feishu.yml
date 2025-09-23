@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       title:
-        description: "手动测试标题（仅 workflow_dispatch 时生效）"
+        description: "手动测试标题"
         required: false
       url:
-        description: "手动测试链接（仅 workflow_dispatch 时生效）"
+        description: "手动测试链接"
         required: false
 
 jobs:
