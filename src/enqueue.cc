@@ -2467,7 +2467,9 @@ ncclResult_t ncclEnqueueCheck(struct ncclInfo* info) {
   TRACE_CALL("nccl%s(%" PRIx64 ",%" PRIx64 ",%zu,%d,%d,%d,%p,%p)", info->opName, reinterpret_cast<int64_t>(info->sendbuff), reinterpret_cast<int64_t>(info->recvbuff), info->count, info->datatype, info->op, info->root, info->comm, info->stream);
 
   // set the comm dev type to original dev instead of backup dev
-  if (nccl_fault_tolerance_enable) {
+  // need to make sure don't check info->comm so early to avoid segmentation fault
+  // in early round of ncclEnqueueCheck, sendComm/recvComm may not be completely ready
+  if (nccl_fault_tolerance_enable && info->comm->ncclFuncTimes > 10) {
     for (int i = 1; i < info->comm->nRanks && i <= 128; i++) {
       int recvPeer = (info->comm->rank - i + info->comm->nRanks) % info->comm->nRanks;
 

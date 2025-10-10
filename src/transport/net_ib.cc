@@ -1144,10 +1144,10 @@ struct ncclIbRecvComm {
   struct ncclIbRemFifo remFifo;
   int sizesFifo[MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   int gpuFlushHostMem;
+  int recvCcCnt; // use for refresh devstate, when recvCcCnt % 600 == 0, we can refresh devstate, we need to make sure recvCcCnt is loaded before access
   int flushEnabled;
   int backupFlushEnabled;
   struct ncclIbRemSyncFifo remSyncFifo;
-  int recvCcCnt; // use for refresh devstate, when recvCcCnt % 600 == 0, we can refresh devstate
 };
 static_assert((offsetof(struct ncclIbRecvComm, remFifo) % 32) == 0, "ncclIbRecvComm fifo must be 32-byte aligned");
 
