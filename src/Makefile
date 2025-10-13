@@ -52,7 +52,12 @@ PKGTARGET  := $(PKGCONFIGFILE)
 LIBOBJ     := $(LIBSRCFILES:%.cc=$(OBJDIR)/%.o)
 BINOBJ     := $(BINSRCFILES:%.cc=$(OBJDIR)/%.o)
 DEPFILES   := $(LIBOBJ:%.o=%.d) $(BINOBJ:%.o=%.d)
-LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl -lmlx5
+LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl
+ifneq ($(wildcard /usr/lib/x86_64-linux-gnu/libmlx5.so),)
+  LDFLAGS += -lmlx5
+else ifneq ($(wildcard /usr/lib/x86_64-linux-gnu/libmlx5.so.1),)
+  LDFLAGS += /usr/lib/x86_64-linux-gnu/libmlx5.so.1
+endif
 INCPLUGIN  := include/plugin
 
 DEVMANIFEST := $(BUILDDIR)/obj/device/manifest
@@ -149,7 +154,7 @@ install : build
 	mkdir -p $(PREFIX)/bin
 	cp -P -v $(BUILDDIR)/lib/lib* $(PREFIX)/lib/
 	cp -P -v $(BUILDDIR)/lib/pkgconfig/* $(PREFIX)/lib/pkgconfig/
-	cp -v $(BUILDDIR)/include/* $(PREFIX)/include/
+	cp -v -r $(BUILDDIR)/include/* $(PREFIX)/include/
 	cp -v $(BUILDDIR)/bin/ncclras $(PREFIX)/bin/
 
 FILESTOFORMAT := $(shell find . -name ".\#*" -prune -o \( -name "*.cc" -o -name "*.h" \) -print | grep -v -E 'ibvwrap.h|nvmlwrap.h|gdrwrap.h|nccl.h')
