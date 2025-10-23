@@ -12,7 +12,8 @@ static ncclNet_v10_t* ncclNet_v10;
 static ncclCollNet_v10_t* ncclCollNet_v10;
 
 ncclNet_t* getNcclNet_v10(void* lib) {
-  ncclNet_v10 = (ncclNet_v10_t*)dlsym(lib, "ncclNetPlugin_v10");
+  // ncclNet_v10 = (ncclNet_v10_t*)dlsym(lib, "ncclNetPlugin_v10");
+  ncclNet_v10 = NULL;
   if (ncclNet_v10) {
     INFO(NCCL_INIT|NCCL_NET, "NET/Plugin: Loaded net plugin %s (v10)", ncclNet_v10->name);
     return ncclNet_v10;
