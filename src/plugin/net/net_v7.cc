@@ -130,7 +130,8 @@ static ncclResult_t ncclNet_init(ncclDebugLogger_t logfn, ncclProfilerCallback_t
 }
 
 ncclNet_t* getNcclNet_v7(void* lib) {
-  ncclNet_v7 = (ncclNet_v7_t*)dlsym(lib, "ncclNetPlugin_v7");
+  // ncclNet_v7 = (ncclNet_v7_t*)dlsym(lib, "ncclNetPlugin_v7");
+  ncclNet_v7 = NULL;
   if (ncclNet_v7) {
     ncclNet.name = ncclNet_v7->name;
     ncclNet.init = ncclNet_init;
