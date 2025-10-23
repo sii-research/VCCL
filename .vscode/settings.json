@@ -5,6 +5,7 @@
         "cassert": "cpp",
         "deque": "cpp",
         "cmath": "cpp",
-        "cstddef": "cpp"
+        "cstddef": "cpp",
+        "*.in": "cpp"
     }
 }
