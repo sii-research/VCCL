@@ -51,6 +51,8 @@ ncclResult_t MemAllocator::allocateMem(void **ptr,
     NCCLCHECKGOTO(commCuMemAlloc(&venusPtr, &slabHandle_, type, slabSize),
                   result, finish);
     venusPtrs_.push_back(venusPtr);
+    slabSizes_.push_back(slabSize);
+    poolLiveCount_[venusPtr] = 0;
     *ptr = venusPtr;
     freeSize_ = slabSize - numBytes;
     startPtr_ = (char *)venusPtr + numBytes;
@@ -66,7 +68,15 @@ ncclResult_t MemAllocator::allocateMem(void **ptr,
     *handlep = slabHandle_; // copy current slab handle by value
   }
 finish:
-  subPtrs_.push_back(*ptr);
+  // Track this sub-allocation and its owning pool
+  void* poolBase = nullptr;
+  if (!venusPtrs_.empty()) {
+    poolBase = venusPtrs_.back();
+  }
+  if (poolBase != nullptr && *ptr != nullptr) {
+    subToPool_[*ptr] = poolBase;
+    poolLiveCount_[poolBase] += 1;
+  }
   return result;
 }
 
@@ -137,15 +147,55 @@ ncclResult_t MemAllocator::commCuMemAlloc(void **ptr,
 
 bool MemAllocator::ownsPointer(const void* ptr) const {
   if (ptr == nullptr) return false;
-  return std::find(subPtrs_.begin(), subPtrs_.end(), ptr) != subPtrs_.end();
+  return subToPool_.find(const_cast<void*>(ptr)) != subToPool_.end();
 }
 
 ncclResult_t MemAllocator::releaseMem(const void *ptr) {
-  if (std::find(venusPtrs_.begin(), venusPtrs_.end(), ptr) != venusPtrs_.end()) {
-    for (auto venusPtr : venusPtrs_) {
-      commCuMemFree(venusPtr);
+  if (ptr == nullptr) return ncclSuccess;
+
+  // Lookup the owning pool for this sub-allocation
+  auto itSub = subToPool_.find(const_cast<void*>(ptr));
+  if (itSub == subToPool_.end()) {
+    // Not a tracked sub-allocation; nothing to do
+    return ncclSuccess;
+  }
+
+  void* poolBase = itSub->second;
+  subToPool_.erase(itSub);
+
+  auto itPool = poolLiveCount_.find(poolBase);
+  if (itPool == poolLiveCount_.end() || itPool->second == 0) {
+    // Inconsistent bookkeeping; do not attempt to free
+    return ncclSuccess;
+  }
+
+  // Decrease live sub-allocation count for this pool
+  itPool->second -= 1;
+
+  // If there are still live sub-allocations, do not free the pool
+  if (itPool->second > 0) {
+    return ncclSuccess;
+  }
+
+  // All sub-allocations under this pool have been released; free the pool
+  commCuMemFree(poolBase);
+
+  // Remove this pool from bookkeeping
+  poolLiveCount_.erase(itPool);
+
+  // Also erase from venusPtrs_ / slabSizes_ and adjust totalMemAllocated_
+  for (size_t i = 0; i < venusPtrs_.size(); ++i) {
+    if (venusPtrs_[i] == poolBase) {
+      size_t slabSize = slabSizes_[i];
+      venusPtrs_.erase(venusPtrs_.begin() + i);
+      slabSizes_.erase(slabSizes_.begin() + i);
+      if (totalMemAllocated_ >= slabSize) {
+        totalMemAllocated_ -= slabSize;
+      }
+      break;
     }
   }
+
   return ncclSuccess;
 }
 

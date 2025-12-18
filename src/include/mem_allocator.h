@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
 
 #include <cuda.h>
@@ -31,8 +32,14 @@ private:
   ncclResult_t commCuMemAlloc(void **ptr, CUmemGenericAllocationHandle *handlep,
                               CUmemAllocationHandleType type, size_t size);
 
+  // Base pointers of all memory pools (each pool is a large slab allocated from CUMEM)
   std::vector<void *> venusPtrs_;
-  std::vector<void *> subPtrs_;
+  // Slab size (total bytes) for each memory pool in venusPtrs_
+  std::vector<size_t> slabSizes_;
+  // Map pool base pointer -> number of live sub-allocations in that pool
+  std::unordered_map<void*, size_t> poolLiveCount_;
+  // Map sub-allocation pointer -> its owning pool base pointer
+  std::unordered_map<void*, void*> subToPool_;
   size_t freeSize_{0};
   void *startPtr_{nullptr};
   CUmemGenericAllocationHandle slabHandle_{};
