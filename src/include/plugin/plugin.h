@@ -9,10 +9,20 @@
 
 #include "nccl.h"
 
+enum ncclPluginType {
+  ncclPluginTypeNet,
+  ncclPluginTypeTuner,
+  ncclPluginTypeProfiler,
+  ncclPluginTypeEnv,
+};
+
 void* ncclOpenNetPluginLib(const char* name);
 void* ncclOpenTunerPluginLib(const char* name);
 void* ncclOpenProfilerPluginLib(const char* name);
-void* ncclGetNetPluginLib(void);
-ncclResult_t ncclClosePluginLib(void* handle);
+void* ncclOpenEnvPluginLib(const char* name);
+void* ncclGetNetPluginLib(enum ncclPluginType type);
+ncclResult_t ncclClosePluginLib(void* handle, enum ncclPluginType type);
+
+extern char* ncclPluginLibPaths[];
 
 #endif

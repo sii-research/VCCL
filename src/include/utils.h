@@ -43,6 +43,12 @@ static long log2i(long n) {
   return log2Down(n);
 }
 
+// Comparator function for qsort/bsearch to compare integers
+static int compareInts(const void *a, const void *b) {
+    int ia = *(const int*)a, ib = *(const int*)b;
+    return (ia > ib) - (ia < ib);
+}
+
 inline uint64_t clockNano() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -59,6 +65,16 @@ inline ncclResult_t getRandomData(void* buffer, size_t bytes) {
     if (fp) fclose(fp);
   }
   return ret;
+}
+
+static inline int gcd(int a, int b) {
+  // use the euclidian algorithm
+  while (b != 0) {
+    int temp = b;
+    b = a % b;
+    a = temp;
+  }
+  return a;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -545,4 +561,6 @@ T* ncclIntruQueueMpscAbandon(ncclIntruQueueMpsc<T,next>* me) {
     return head;
   }
 }
+
+ncclResult_t ncclBitsToString(uint32_t bits, uint32_t mask, const char* (*toStr)(int), char *buf, size_t bufLen, const char *wildcard);
 #endif

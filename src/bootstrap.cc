@@ -14,6 +14,7 @@
 #include "proxy.h"
 #include "param.h"
 #include "ras.h"
+#include <mutex>
 
 #define BOOTSTRAP_N_CHECK_ABORT           10000
 #define BOOTSTRAP_TAG_CONNECT             (0x1 << 31)
@@ -85,32 +86,32 @@ struct bootstrapRootArgs {
 static char bootstrapNetIfName[MAX_IF_NAME_SIZE+1];
 static union ncclSocketAddress bootstrapNetIfAddr;
 static int bootstrapNetInitDone = 0;
-pthread_mutex_t bootstrapNetLock = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex bootstrapNetMutex;
 
 NCCL_PARAM(BootstrapNetEnable,"OOB_NET_ENABLE", 0);
 
 ncclResult_t bootstrapNetInit() {
   if (bootstrapNetInitDone == 0) {
-    pthread_mutex_lock(&bootstrapNetLock);
+    std::lock_guard<std::mutex> lock(bootstrapNetMutex);
     if (bootstrapNetInitDone == 0) {
       const char* env = ncclGetEnv("NCCL_COMM_ID");
+      int nIfs = 0;
       if (env) {
         union ncclSocketAddress remoteAddr;
         if (ncclSocketGetAddrFromString(&remoteAddr, env) != ncclSuccess) {
           WARN("Invalid NCCL_COMM_ID, please use format: <ipv4>:<port> or [<ipv6>]:<port> or <hostname>:<port>");
-          pthread_mutex_unlock(&bootstrapNetLock);
           return ncclInvalidArgument;
         }
-        if (ncclFindInterfaceMatchSubnet(bootstrapNetIfName, &bootstrapNetIfAddr, &remoteAddr, MAX_IF_NAME_SIZE, 1) <= 0) {
+        NCCLCHECK(ncclFindInterfaceMatchSubnet(bootstrapNetIfName, &bootstrapNetIfAddr, &remoteAddr, MAX_IF_NAME_SIZE,
+                                               &nIfs));
+        if (nIfs <= 0) {
           WARN("NET/Socket : No usable listening interface found");
-          pthread_mutex_unlock(&bootstrapNetLock);
           return ncclSystemError;
         }
       } else {
-        int nIfs = ncclFindInterfaces(bootstrapNetIfName, &bootstrapNetIfAddr, MAX_IF_NAME_SIZE, 1);
+        NCCLCHECK(ncclFindInterfaces(bootstrapNetIfName, &bootstrapNetIfAddr, MAX_IF_NAME_SIZE, 1, &nIfs));
         if (nIfs <= 0) {
           WARN("Bootstrap : no socket interface found");
-          pthread_mutex_unlock(&bootstrapNetLock);
           return ncclInvalidUsage;
         }
       }
@@ -120,7 +121,6 @@ ncclResult_t bootstrapNetInit() {
       INFO(NCCL_BOOTSTRAP, "Bootstrap: Using%s", line);
       bootstrapNetInitDone = 1;
     }
-    pthread_mutex_unlock(&bootstrapNetLock);
   }
   return ncclSuccess;
 }
@@ -223,6 +223,21 @@ static ncclResult_t socketSendRecv(struct ncclSocket* sendSock, void* sendData, 
     return ncclInternalError;
   }
   NCCLCHECK(ncclSocketSendRecv(sendSock, sendData, sendSize, recvSock, recvData, std::min(recvSize, senderRecvSize)));
+  return ncclSuccess;
+}
+
+static ncclResult_t socketDoubleSendRecv(struct ncclSocketOp ops[4]) {
+  // ops synchronously exchange size then asynchronously exchange data in send->recv->send->recv order
+  int senderRecvSize1, senderRecvSize2;
+  NCCLCHECK(ncclSocketSendRecv(ops[0].sock, &ops[0].size, sizeof(int), ops[1].sock, &senderRecvSize1, sizeof(int)));
+  NCCLCHECK(ncclSocketSendRecv(ops[2].sock, &ops[2].size, sizeof(int), ops[3].sock, &senderRecvSize2, sizeof(int)));
+  if (senderRecvSize1 > ops[1].size || senderRecvSize2 > ops[3].size) {
+    WARN("Message truncated : received %d,%d bytes instead of %d,%d", senderRecvSize1, senderRecvSize2, ops[1].size, ops[3].size);
+    return ncclInternalError;
+  }
+  ops[1].size = std::min(ops[1].size, senderRecvSize1);
+  ops[3].size = std::min(ops[3].size, senderRecvSize2);
+  NCCLCHECK(ncclSocketMultiOp(ops, 4));
   return ncclSuccess;
 }
 
@@ -482,7 +497,7 @@ static ncclResult_t getUDS(uint64_t* peerUDS) {
 static ncclResult_t netGetDevice(int rank, struct ncclComm* comm, int* dev) {
   static int devOOB = -1;
   if (devOOB < 0) {
-    pthread_mutex_lock(&bootstrapNetLock);
+    std::lock_guard<std::mutex> lock(bootstrapNetMutex);
     if (devOOB < 0) {
       const char* userIfEnv = ncclGetEnv("NCCL_OOB_NET_IFNAME");
       if (userIfEnv && strlen(userIfEnv) > 0) {
@@ -513,7 +528,6 @@ static ncclResult_t netGetDevice(int rank, struct ncclComm* comm, int* dev) {
             WARN("no device found matching %s%s, verify NCCL_OOB_NET_IFNAME", searchExact ? "exactly " : "", userIfEnv);
           else
             WARN("no device found after excluding %s%s, verify NCCL_OOB_NET_IFNAME", searchExact ? "exactly " : "", userIfEnv);
-          pthread_mutex_unlock(&bootstrapNetLock);
           return ncclInvalidArgument;
         }
       } else {
@@ -526,13 +540,12 @@ static ncclResult_t netGetDevice(int rank, struct ncclComm* comm, int* dev) {
       bool hasProp = res == ncclSuccess;
       INFO(NCCL_BOOTSTRAP, "Bootstrap: Using %s:%d", (hasProp) ? props.name : "N/A", (hasProp) ? props.port : -1);
     }
-    pthread_mutex_unlock(&bootstrapNetLock);
   }
   *dev = devOOB;
   return ncclSuccess;
 }
 
-static ncclResult_t netRingConnect(ncclNet_t* net, struct bootstrapListen_t* listen, char peerHandle[NCCL_NET_HANDLE_MAXSIZE],
+static ncclResult_t netRingConnect(void* ctx, ncclNet_t* net, struct bootstrapListen_t* listen, char peerHandle[NCCL_NET_HANDLE_MAXSIZE],
                                    void** sendComm, ncclNetDeviceHandle_t** sendDevHandle,
                                    void** recvComm, ncclNetDeviceHandle_t** recvDevHandle, volatile uint32_t* abortFlag) {
 
@@ -540,7 +553,7 @@ static ncclResult_t netRingConnect(ncclNet_t* net, struct bootstrapListen_t* lis
   do {
     NCCLCHECK(checkAbort(abortFlag, &abortCounter));
     if (!*sendComm)
-      NCCLCHECK(net->connect(listen->net.dev, NULL, peerHandle, sendComm, sendDevHandle));
+      NCCLCHECK(net->connect(ctx, listen->net.dev, peerHandle, sendComm, sendDevHandle));
     if (!*recvComm)
       NCCLCHECK(net->accept(listen->net.comm, recvComm, recvDevHandle));
   } while (!*sendComm || !*recvComm);
@@ -652,7 +665,7 @@ ncclResult_t bootstrapInit(int nHandles, void* handles, struct ncclComm* comm) {
   if (ncclParamBootstrapNetEnable()) {
     // Create net interface for other ranks to contact me (all gather)
     NCCLCHECK(netGetDevice(rank, comm, &STATE_LISTEN(state, net.dev)));
-    NCCLCHECK(state->net->listen(STATE_LISTEN(state, net.dev), STATE_LISTEN(state, net.handle), &STATE_LISTEN(state, net.comm)));
+    NCCLCHECK(state->net->listen(comm->netContext, STATE_LISTEN(state, net.dev), STATE_LISTEN(state, net.handle), &STATE_LISTEN(state, net.comm)));
     memcpy(info.connectInfo.handle, STATE_LISTEN(state, net.handle), NCCL_NET_HANDLE_MAXSIZE);
   } else {
     // create socket for ring neightbor to contact mee
@@ -706,7 +719,7 @@ ncclResult_t bootstrapInit(int nHandles, void* handles, struct ncclComm* comm) {
 
   // accept and connect the ring network
   if (ncclParamBootstrapNetEnable()) {
-    NCCLCHECK(netRingConnect(state->net, &state->listen, nextPeer.handle,
+    NCCLCHECK(netRingConnect(comm->netContext, state->net, &state->listen, nextPeer.handle,
                              &STATE_RING(state, net.sendComm), &STATE_RING(state, net.sendDevHandle),
                              &STATE_RING(state, net.recvComm), &STATE_RING(state, net.recvDevHandle), state->abortFlag));
   } else {
@@ -799,7 +812,7 @@ ncclResult_t bootstrapSplit(uint64_t magic, struct ncclComm* comm, struct ncclCo
   // create a handle for the others to reach out to me
   if (ncclParamBootstrapNetEnable()) {
     NCCLCHECKGOTO(netGetDevice(rank, comm, &STATE_LISTEN(state, net.dev)), ret, fail);
-    NCCLCHECKGOTO(state->net->listen(STATE_LISTEN(state, net.dev), STATE_LISTEN(state, net.handle), &STATE_LISTEN(state, net.comm)), ret, fail);
+    NCCLCHECKGOTO(state->net->listen(comm->netContext, STATE_LISTEN(state, net.dev), STATE_LISTEN(state, net.handle), &STATE_LISTEN(state, net.comm)), ret, fail);
     memcpy(info.handle, STATE_LISTEN(state, net.handle), NCCL_NET_HANDLE_MAXSIZE);
   } else {
     // create socket for ring neightbor to contact mee
@@ -818,7 +831,7 @@ ncclResult_t bootstrapSplit(uint64_t magic, struct ncclComm* comm, struct ncclCo
   NCCLCHECKGOTO(bootstrapSend(parent->bootstrap, prev, BOOTSTRAP_TAG_COMMSPLIT, &info, sizeof(union ringConnectInfo)), ret, fail);
   NCCLCHECKGOTO(bootstrapRecv(parent->bootstrap, next, BOOTSTRAP_TAG_COMMSPLIT, &nextPeer, sizeof(union ringConnectInfo)), ret, fail);
   if (ncclParamBootstrapNetEnable()) {
-    NCCLCHECKGOTO(netRingConnect(state->net, &state->listen, nextPeer.handle,
+    NCCLCHECKGOTO(netRingConnect(comm->netContext, state->net, &state->listen, nextPeer.handle,
                                  &STATE_RING(state, net.sendComm), &STATE_RING(state, net.sendDevHandle),
                                  &STATE_RING(state, net.recvComm), &STATE_RING(state, net.recvDevHandle), state->abortFlag),
                   ret, fail);
@@ -828,7 +841,7 @@ ncclResult_t bootstrapSplit(uint64_t magic, struct ncclComm* comm, struct ncclCo
 
   NCCLCHECKGOTO(ncclCalloc(&state->peerP2pAddresses, nranks), ret, fail);
   memcpy(state->peerP2pAddresses + rank, &peerSocketAddress, sizeof(union ncclSocketAddress));
-  if (parent->config.splitShare) {
+  if (parent->shareResources) {
     /* map local rank to top parent local rank. */
     for (int i = 0; i < nranks; ++i) {
       comm->topParentRanks[i] = parent->topParentRanks[parentRanks[i]];
@@ -1009,22 +1022,40 @@ exit:
   if (recvDataHandle) netDereg(net, recvComm, &recvDataHandle);
   return res;
 }
-static ncclResult_t socketRingAllGather(struct ncclSocket* sendSock, struct ncclSocket* recvSock, int rank, int nranks, char* data, int size) {
+static ncclResult_t socketRingAllGather(struct ncclSocket* nextSock, struct ncclSocket* prevSock, int rank, int nranks, char* data, int size) {
   ncclResult_t res = ncclSuccess;
   uint64_t tFirst = 0, tRest = 0;
   /* Simple ring based AllGather
    * At each step i receive data from (rank-i-1) from prev
    * and send previous step's data from (rank-i) to next
    */
-  TRACE(NCCL_BOOTSTRAP, "socketRingAllGather started");
+  TRACE(NCCL_BOOTSTRAP, "socketRingAllGather started: rank=%d nranks=%d", rank, nranks);
+  int totalSteps = nranks / 2;
+  TRACE(NCCL_BOOTSTRAP, "bidirectional bootstrap: totalSteps=%d", totalSteps);
   BOOTSTRAP_PROF_OPEN(tFirst);
-  for (int i = 0; i < nranks - 1; i++) {
-    size_t rslice = (rank - i - 1 + nranks) % nranks;
-    size_t sslice = (rank - i + nranks) % nranks;
-    void* recv_data = data + rslice * size;
-    void* send_data = data + sslice * size;
-    NCCLCHECKGOTO(socketSendRecv(sendSock, send_data, size, recvSock, recv_data, size), res, exit);
-    if (i == 0) {
+  for (int step = 0; step < totalSteps; step++) {
+    // N ranks requires (N-1)/2 steps for the double ring  algorithm. If N is even, the last step is requires a single send/recv
+    bool isFinalUnidirectional = (step == totalSteps - 1) && (nranks % 2 == 0);
+    // Ring0: ring from previous to next
+    int sendSliceRing0 = (rank - step + nranks) % nranks;      // Send this slice to next neighbor
+    int recvSliceRing0 = (rank - step - 1 + nranks) % nranks;  // Receive this slice from prev neighbor
+    // Ring1: ring from next to previous
+    int sendSliceRing1 = (rank + step) % nranks;               // Send this slice to prev neighbor
+    int recvSliceRing1 = (rank + step + 1) % nranks;           // Receive this slice from next neighbor
+    if (isFinalUnidirectional) {
+      // Final unidirectional step, only Ring0 is used
+      NCCLCHECKGOTO(socketSendRecv(nextSock, data + sendSliceRing0 * size, size, prevSock, data + recvSliceRing0 * size, size), res, exit);
+    } else {
+      // Bidirectional step: Ring0 and Ring1 are used simultaneously
+      struct ncclSocketOp ops[4] = {
+        {NCCL_SOCKET_SEND, nextSock, data + sendSliceRing0 * size, size, 0},  // Ring0: send to next
+        {NCCL_SOCKET_RECV, prevSock, data + recvSliceRing0 * size, size, 0},  // Ring0: recv from prev
+        {NCCL_SOCKET_SEND, prevSock, data + sendSliceRing1 * size, size, 0},  // Ring1: send to prev
+        {NCCL_SOCKET_RECV, nextSock, data + recvSliceRing1 * size, size, 0}   // Ring1: recv from next
+      };
+      NCCLCHECKGOTO(socketDoubleSendRecv(ops), res, exit);
+    }
+    if (step == 0) {
       BOOTSTRAP_PROF_CLOSE(tFirst);
       BOOTSTRAP_PROF_OPEN(tRest);
     }
