@@ -28,6 +28,7 @@ static uint64_t ncclDebugTimestampMaxSubseconds;  // Max number of subseconds pl
 static int ncclDebugTimestampSubsecondDigits;     // Number of digits to display
 static int pid = -1;
 static char hostname[1024];
+char global_hostname[1024];
 thread_local int ncclDebugNoWarn = 0;
 char ncclLastError[1024] = ""; // Global string for the last error in human readable form
 uint64_t ncclDebugMask = 0;
@@ -215,6 +216,7 @@ static void ncclDebugInit() {
 
   // Cache pid and hostname
   getHostName(hostname, 1024, '.');
+  memcpy(global_hostname, hostname, 1024);
   pid = getpid();
 
   /* Parse and expand the NCCL_DEBUG_FILE path and

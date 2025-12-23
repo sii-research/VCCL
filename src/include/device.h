@@ -164,6 +164,7 @@ struct ncclConnector {
   struct ncclTransportComm* transportComm;
   void* transportResources;
   struct ncclConnInfo conn;
+  bool noUsePxnTransport;
 };
 
 struct ncclRing {

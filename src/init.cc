@@ -36,6 +36,7 @@
 #include "ce_coll.h"
 #include "nvtx.h"
 #include "env.h"
+#include "timer_log.h"
 
 #define STR2(v) #v
 #define STR(v) STR2(v)
@@ -2000,6 +2001,7 @@ static ncclResult_t ncclCommInitRankDev(ncclComm_t* newcomm, int nranks, int nId
   comm->initState = ncclInProgress;
   *newcomm = comm;
 
+  comm->groupHash = (unsigned long long)getHash(commId->internal, NCCL_UNIQUE_ID_BYTES);
   NCCLCHECKGOTO(ncclCalloc(&job, 1), res, fail);
   job->nId = nId;
   job->comm = comm;
