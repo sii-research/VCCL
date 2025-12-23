@@ -1676,7 +1676,7 @@ int cmpNetIndice(const void *n1, const void *n2) {
 
 ncclResult_t ncclTopoSmartGetNet(struct ncclTopoSystem *system, int rank, int channelId, int64_t *id, int64_t *backupId) {
   int gpu;
-  NCCLCHECK(ncclTopoRankToIndex(system, rank, &gpu));
+  NCCLCHECK(ncclTopoRankToIndex(system, rank, &gpu, /*showWarn=*/true));
   int localNets[NCCL_TOPO_MAX_NODES];
   int localNetCount;
   NCCLCHECK(ncclTopoGetLocal(system, GPU, gpu, NET, localNets, &localNetCount, NULL));
