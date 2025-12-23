@@ -19,6 +19,7 @@
 #include "register_inline.h"
 
 static_assert(sizeof(ncclNetHandle_t) <= CONNECT_SIZE, "NET Connect info is too large");
+extern int64_t ncclParamEnableFaultTolerance();
 
 #define NCCL_NET_MAP_HOSTMEM 0
 #define NCCL_NET_MAP_DEVMEM 1
@@ -1579,7 +1580,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
           }
         }
         else {
-          if (result != ncclSuccess) {
+          if (ncclParamEnableFaultTolerance() && result != ncclSuccess) {
             // change the sub with same sendComm to rollback state
             for (int i = 0; i < args->nsubs; i++) {
               struct ncclProxySubArgs *t_sub = args->subs + i;
@@ -1805,7 +1806,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
           args->idle = 0;
         }
         else {
-          if (result != ncclSuccess) {
+          if (ncclParamEnableFaultTolerance() && result != ncclSuccess) {
             int errPortIdx;
             NCCLCHECK(ncclIbGetErrorPortIdx(subGroup->requests[subGroup->received % NCCL_STEPS], errPortIdx));
             struct recvNetResources *error_resources = (struct recvNetResources *)(subGroup->connection->transportResources);
@@ -1876,7 +1877,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
           args->idle = 0;
         }
         else {
-          if (result != ncclSuccess) {
+          if (ncclParamEnableFaultTolerance() && result != ncclSuccess) {
             for (int s = 0; s < args->nsubs; s += args->subs[s].groupSize) {
               struct ncclProxySubArgs *t_subGroup = args->subs + s;
               for (int t_b = t_subGroup->transmitted; t_b < t_subGroup->received; t_b += args->sliceSteps) {
