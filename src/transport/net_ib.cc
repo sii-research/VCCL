@@ -1158,7 +1158,6 @@ struct ncclIbSendFifo {
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
   uint32_t nreqs;
   uint32_t tag;
-  uint64_t idx;
   uint8_t if_backup;
   uint64_t idx;
   char padding[8];
@@ -4433,7 +4432,7 @@ ncclResult_t ncclGinIbProxyIPut(void *collComm, uint64_t srcOff, void *srcMhandl
 
   struct ibv_send_wr* bad_wr;
   NCCLCHECK(wrap_ibv_post_send(qp->qp, &wr, &bad_wr));
-  ncclIbAddEvent(req, qp->devIndex, &comm->devs[qp->devIndex].base);
+  ncclIbAddEvent(req, qp->devIndex, &comm->devs[qp->devIndex].base, true);
 
   *request = req;
   return ncclSuccess;
@@ -4516,7 +4515,7 @@ ncclResult_t ncclGinIbProxyIPutSignal(void *collComm, uint64_t srcOff, void *src
   // Send the put and the signal in one go
   struct ibv_send_wr* bad_wr;
   NCCLCHECK(wrap_ibv_post_send(qp->qp, size > 0 ? &wr[0] : &wr[1], &bad_wr));
-  ncclIbAddEvent(req, qp->devIndex, &comm->devs[qp->devIndex].base);
+  ncclIbAddEvent(req, qp->devIndex, &comm->devs[qp->devIndex].base, true);
   *request = req;
   return ncclSuccess;
 }

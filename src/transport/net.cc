@@ -838,9 +838,6 @@ static ncclResult_t recvProxySetup(struct ncclProxyConnection* connection, struc
   NCCLCHECK(proxyState->ncclNet->listen(proxyState->netContext, req->netDev, respBuff, &resources->netListenComm));
   *done = 1;
 
-  if (proxyState->ncclNet == &ncclNetIb)
-    NCCLCHECK(saveChannelToQp(resources->netSendComm, resources->channelId));
-
   return ncclSuccess;
 }
 
@@ -922,6 +919,9 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
   }
   printNetAttrs(&req->netAttr, "send connect");
   *done = 1;
+
+  if (proxyState->ncclNet == &ncclNetIb)
+    NCCLCHECK(saveChannelToQp(resources->netSendComm, resources->channelId));
 
   if (resources->netDeviceHandle) {
     connection->netDeviceHandle = resources->netDeviceHandle;
