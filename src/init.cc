@@ -600,7 +600,7 @@ fail:
 }
 
 // Pre-process the string so that running "strings" on the lib can quickly reveal the version.
-#define VERSION_STRING "NCCL version " STR(NCCL_MAJOR) "." STR(NCCL_MINOR) "." STR(NCCL_PATCH) NCCL_SUFFIX "+cuda" STR(CUDA_MAJOR) "." STR(CUDA_MINOR)
+#define VERSION_STRING "VCCL version " STR(NCCL_MAJOR) "." STR(NCCL_MINOR) "." STR(NCCL_PATCH) NCCL_SUFFIX "+cuda" STR(CUDA_MAJOR) "." STR(CUDA_MINOR)
 static void showVersion() {
   if (ncclDebugLevel == NCCL_LOG_VERSION || ncclDebugLevel == NCCL_LOG_WARN) {
     VERSION("%s", VERSION_STRING);
@@ -893,7 +893,7 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   comm->cuMemSupport = 1;
   for (int i = 0; i < nranks; i++) {
     if (comm->peerInfo[i].version != comm->peerInfo[rank].version) {
-      WARN("Mismatched NCCL version detected : rank %d version %d rank %d version %d",
+      WARN("Mismatched VCCL version detected : rank %d version %d rank %d version %d",
            i, comm->peerInfo[i].version, rank, comm->peerInfo[rank].version);
       ret = ncclInvalidUsage;
       goto fail;
@@ -1281,9 +1281,6 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
     }
     NCCLCHECKGOTO(ncclTransportRingConnect(comm), ret, fail);
 
-    // Connect Trees
-    NCCLCHECKGOTO(ncclTransportTreeConnect(comm), ret, fail);
-
     // Connect PAT only for communicators with 1 GPU per node
     if (comm->maxLocalRanks == 1) NCCLCHECKGOTO(ncclTransportPatConnect(comm), ret, fail);
 
@@ -1293,6 +1290,9 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
 
     // And NVLS trees if needed
     NCCLCHECKGOTO(ncclNvlsTreeConnect(comm), ret, fail);
+
+    // Connect Trees
+    NCCLCHECKGOTO(ncclTransportTreeConnect(comm), ret, fail);
 
     // Check if we can setup CollNet
     if (comm->config.collnetEnable) {
@@ -1788,7 +1788,7 @@ static ncclResult_t envConfigOverride(ncclComm_t comm) {
   }
 
   if (comm->config.nvlsCTAs != NCCL_CONFIG_UNDEF_INT && comm->config.nvlsCTAs <= 0) {
-    INFO(NCCL_ENV, "nvlsCTAs %d is not a valid value, NCCL will decide the default value automatically", comm->config.nvlsCTAs);
+    INFO(NCCL_ENV, "nvlsCTAs %d is not a valid value, VCCL will decide the default value automatically", comm->config.nvlsCTAs);
     comm->config.nvlsCTAs = NCCL_CONFIG_UNDEF_INT;
   }
 
@@ -1849,7 +1849,7 @@ static ncclResult_t parseCommConfig(ncclComm_t comm, ncclConfig_t *config) {
     }
   }
 
-  /* check input config attributes, -1 means user-undefined and we should use default value from NCCL. */
+  /* check input config attributes, -1 means user-undefined and we should use default value from VCCL. */
   if (internalConfigPtr->blocking != NCCL_CONFIG_UNDEF_INT && internalConfigPtr->blocking != 0 && internalConfigPtr->blocking != 1) {
     WARN("Invalid config blocking attribute value %d", internalConfigPtr->blocking);
     ret = ncclInvalidArgument;
@@ -2685,7 +2685,7 @@ const char* ncclGetErrorString(ncclResult_t code) {
     case ncclSuccess                : return "no error";
     case ncclUnhandledCudaError     : return "unhandled cuda error (run with NCCL_DEBUG=INFO for details)";
     case ncclSystemError            : return "unhandled system error (run with NCCL_DEBUG=INFO for details)";
-    case ncclInternalError          : return "internal error - please report this issue to the NCCL developers";
+    case ncclInternalError          : return "internal error - please report this issue to the VCCL developers";
     case ncclInvalidArgument        : return "invalid argument (run with NCCL_DEBUG=WARN for details)";
     case ncclInvalidUsage           : return "invalid usage (run with NCCL_DEBUG=WARN for details)";
     case ncclRemoteError            : return "remote process exited or there was a network error";

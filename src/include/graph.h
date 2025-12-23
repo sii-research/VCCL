@@ -33,7 +33,7 @@ ncclResult_t ncclTopoPathAllNVLink(struct ncclTopoSystem* system, int* allNvLink
 ncclResult_t ncclTopoComputeCommCPU(struct ncclComm* comm);
 
 // Query topology
-ncclResult_t ncclTopoGetNetDev(struct ncclComm* comm, int rank, struct ncclTopoGraph* graph, int channelId, int peerRank, int64_t* id, int* dev, int* proxyRank);
+ncclResult_t ncclTopoGetNetDev(struct ncclComm* comm, int rank, struct ncclTopoGraph* graph, int channelId, int peerRank, int64_t* id, int* dev, int64_t* backupId, int *backupDev, int* proxyRank);
 ncclResult_t ncclTopoCheckP2p(struct ncclComm* comm, struct ncclTopoSystem* system, int rank1, int rank2, int* p2p, int *read, int* intermediateRank, int* cudaP2p);
 ncclResult_t ncclTopoCheckMNNVL(struct ncclTopoSystem* system, struct ncclPeerInfo* info1, struct ncclPeerInfo* info2, int* ret);
 enum ncclTopoGdrMode {
@@ -73,6 +73,8 @@ ncclResult_t ncclTopoGetGpuCount(struct ncclTopoSystem* system, int* count);
 ncclResult_t ncclTopoGetNetCount(struct ncclTopoSystem* system, int* count);
 ncclResult_t ncclTopoGetNvsCount(struct ncclTopoSystem* system, int* count);
 ncclResult_t ncclTopoGetLocalNet(struct ncclTopoSystem* system, int rank, int channelId, int64_t* id, int* dev);
+ncclResult_t ncclTopoSmartGetNet(struct ncclTopoSystem* system, int rank, int channelId, int64_t* id, int64_t* backupId);
+int cmpNetIndice(const void *n1, const void* n2);
 ncclResult_t ncclTopoGetLocalNets(struct ncclTopoSystem* system, int rank, int64_t* localNets, int* localNetCount);
 ncclResult_t ncclTopoGetLocalGpu(struct ncclTopoSystem* system, int64_t netId, int* gpuIndex);
 ncclResult_t getLocalNetCountByBw(struct ncclTopoSystem* system, int gpu, int *count);
@@ -129,6 +131,17 @@ struct ncclTopoRanks {
   int ringSend[MAXCHANNELS];
   int ringPrev[MAXCHANNELS];
   int ringNext[MAXCHANNELS];
+  /*
+   * on the node with odd number id
+   * the order of the local ranks
+   * should be reversed to keep the
+   * the 2 GPUs crossing 2 nodes have
+   * the same id.
+   */
+  int ringReverseRecv[MAXCHANNELS];
+  int ringReverseSend[MAXCHANNELS];
+  int ringReversePrev[MAXCHANNELS];
+  int ringReverseNext[MAXCHANNELS];
   int treeToParent[MAXCHANNELS];
   int treeToChild0[MAXCHANNELS];
   int treeToChild1[MAXCHANNELS];

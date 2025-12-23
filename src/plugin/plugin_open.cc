@@ -113,6 +113,10 @@ static void* openPluginLib(enum ncclPluginType type, const char* libName) {
 }
 
 void* ncclOpenNetPluginLib(const char* name) {
+  // If the net plugin is not specified, we return nullptr to indicate no plugin is loaded.
+  if (name == nullptr || strlen(name) == 0) {
+    return nullptr;
+  }
   return openPluginLib(ncclPluginTypeNet, name);
 }
 
