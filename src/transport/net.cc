@@ -16,8 +16,10 @@
 #include "transport.h"
 #include "shm.h"
 #include <assert.h>
+#include "register_inline.h"
 
 static_assert(sizeof(ncclNetHandle_t) <= CONNECT_SIZE, "NET Connect info is too large");
+extern int64_t ncclParamEnableFaultTolerance();
 
 #define NCCL_NET_MAP_HOSTMEM 0
 #define NCCL_NET_MAP_DEVMEM 1
@@ -92,9 +94,12 @@ struct sendNetResources {
   int tpLocalRank;
   int tpRemoteRank;
   int netDev;
+  int backupNetDev;
   enum ncclTopoGdrMode useGdr;
   int useDmaBuf;
+  int backupUseDmaBuf;
   int maxRecvs;
+  int backupMaxRecvs;
   uint64_t* gdcSync;
   void* gdrDesc;
   int shared;
@@ -106,7 +111,9 @@ struct sendNetResources {
   uint64_t step;
   uint64_t llLastCleaning;
   int netDeviceVersion;
+  int backupNetDeviceVersion;
   ncclNetDeviceType netDeviceType;
+  ncclNetDeviceType backupNetDeviceType;
   ncclNetDeviceHandle_t* netDeviceHandle;
   size_t maxP2pBytes;
 };
@@ -123,10 +130,13 @@ struct recvNetResources {
   int tpRemoteRank;
   int tpRemoteProxyRank;
   int netDev;
+  int backupNetDev;
   enum ncclTopoGdrMode useGdr;
   int useDmaBuf;
+  int backupUseDmaBuf;
   int needFlush;
   int maxRecvs;
+  int backupMaxRecvs;
   uint64_t* gdcSync;
   uint64_t* gdcFlush;
   void* gdrDesc;
@@ -139,7 +149,9 @@ struct recvNetResources {
   uint64_t step;
   uint64_t llLastCleaning;
   int netDeviceVersion;
+  int backupNetDeviceVersion;
   ncclNetDeviceType netDeviceType;
+  ncclNetDeviceType backupNetDeviceType;
   ncclNetDeviceHandle_t* netDeviceHandle;
   size_t maxP2pBytes;
 };
@@ -149,6 +161,7 @@ struct netRegInfo {
   size_t size;
 };
 
+extern int ncclIbBackupDevs[32];
 /* Determine if two peers can communicate with NET */
 static ncclResult_t canConnect(int* ret, struct ncclComm* comm, struct ncclTopoGraph* graph, struct ncclPeerInfo* info1, struct ncclPeerInfo* info2) {
   *ret = 1;
@@ -168,15 +181,120 @@ struct setupReq {
   int tpRemoteRank;
   int shared;
   int netDev;
+  int backupNetDev;
   enum ncclTopoGdrMode useGdr;
   int needFlush;
   int channelId;
   int connIndex;
 };
 
+extern ncclResult_t saveChannelToQp(void *netSendComm, int channel_id);
+extern ncclResult_t setCommunicationAlgorithm(void *netSendComm, uint8_t func);
+extern ncclResult_t setNcclFuncTimes(void *netSendComm, unsigned long long ncclFuncTimes);
+extern ncclResult_t setNcclPeerRank(void *netSendComm, int rank);
+extern ncclResult_t setNcclGroupHash(void *netSendComm, uint64_t groupHash);
+extern ncclResult_t setNcclRank(void *netSendComm, int rank);
+extern ncclNet_t *ncclNets[3];
+extern int ncclIbBackupDevs[32];
+
 NCCL_PARAM(NetOptionalRecvCompletion, "NET_OPTIONAL_RECV_COMPLETION", 1);
 
 static_assert(sizeof(ncclNetHandle_t) + sizeof(int) <= CONNECT_SIZE, "Not large enough ncclConnect to hold ncclNetHandle_t and useGdr flag");
+
+// Common function to initialize network attributes from a ncclComm
+static void populateCommNetAttrs(struct ncclComm* comm, struct ncclConnector* conn, ncclNetAttr_t* netAttr) {
+  *netAttr = NCCL_NET_ATTR_INIT;
+  netAttr->sendCommAttr.minConcurrentPeers = 1;
+  netAttr->sendCommAttr.minFlowsPerPeer = 1;
+
+  netAttr->recvCommAttr.minConcurrentPeers = 1;
+  netAttr->recvCommAttr.minFlowsPerPeer = 1;
+
+  if (conn->p2pOnly) {
+    size_t maxConcPeers = comm->p2pnChannels * NCCL_MAX_DEV_WORK_P2P_PER_BATCH;
+    if (comm->nRanks < maxConcPeers) maxConcPeers = comm->nRanks;
+
+    netAttr->sendCommAttr.maxConcurrentPeers = maxConcPeers;
+    netAttr->sendCommAttr.maxFlowsPerPeer = comm->p2pnChannelsPerPeer;
+    netAttr->recvCommAttr.maxConcurrentPeers = maxConcPeers;
+    netAttr->recvCommAttr.maxFlowsPerPeer = comm->p2pnChannelsPerPeer;
+    netAttr->op = BIT(ncclFuncSend) | BIT(ncclFuncRecv) |
+                  BIT(ncclFuncAlltoAll) | BIT(ncclFuncScatter) | BIT(ncclFuncGather);
+  } else {
+    size_t maxConcPeers = (NCCL_MAX_TREE_ARITY - 1) * 2;
+    if (comm->nRanks < maxConcPeers) maxConcPeers = comm->nRanks;
+    netAttr->sendCommAttr.maxConcurrentPeers = maxConcPeers;
+    netAttr->sendCommAttr.maxFlowsPerPeer = comm->nChannels;
+    netAttr->recvCommAttr.maxConcurrentPeers = maxConcPeers;
+    netAttr->recvCommAttr.maxFlowsPerPeer = comm->nChannels;
+  }
+}
+
+// Apply the netAttr to the netComm
+void setNetAttrs(struct ncclProxyState* proxyState, ncclNetAttr_t* netAttr)
+{
+  if (proxyState->ncclNet->setNetAttr) {
+    proxyState->ncclNet->setNetAttr(proxyState->netContext, netAttr);
+    proxyState->netAttr = *netAttr;
+  }
+}
+
+void printNetAttrs(ncclNetAttr_t* netAttr, const char *task)
+{
+  const int opBufLen = ncclNumFuncs*32;
+  char opBuf[opBufLen] = "";
+  const int algoBufLen = NCCL_NUM_ALGORITHMS*32;
+  char algoBuf[algoBufLen] = "";
+  const int protoBufLen = NCCL_NUM_PROTOCOLS*32;
+  char protoBuf[protoBufLen] = "";
+
+  ncclBitsToString(netAttr->op, MASK(ncclNumFuncs), (const char* (*)(int))ncclFuncToString, opBuf, opBufLen, "*");
+  ncclBitsToString(netAttr->algo, MASK(NCCL_NUM_ALGORITHMS), ncclAlgoToString, algoBuf, algoBufLen, "*");
+  ncclBitsToString(netAttr->proto, MASK(NCCL_NUM_PROTOCOLS), ncclProtoToString, protoBuf, protoBufLen, "*");
+
+  TRACE(NCCL_NET, "%s hints, send peers/flows: [%d-%d][%d-%d] recv peers/flows: [%d-%d][%d-%d] op: %s algo: %s proto: %s",
+        task, netAttr->sendCommAttr.minConcurrentPeers, netAttr->sendCommAttr.maxConcurrentPeers,
+        netAttr->sendCommAttr.minFlowsPerPeer, netAttr->sendCommAttr.maxFlowsPerPeer,
+        netAttr->recvCommAttr.minConcurrentPeers, netAttr->recvCommAttr.maxConcurrentPeers,
+        netAttr->recvCommAttr.minFlowsPerPeer, netAttr->recvCommAttr.maxFlowsPerPeer,
+        opBuf, algoBuf, protoBuf);
+}
+
+// Set the netAttr for a transfer operation
+void setXferNetAttrs(struct ncclProxyState* proxyState, struct ncclProxyArgs* args, int send)
+{
+  ncclNetAttr_t netAttr;
+
+  if (!proxyState->ncclNet->setNetAttr)
+    return;
+
+  netAttr = proxyState->netAttr;
+
+  if (send) {
+    netAttr.sendCommAttr.maxConcurrentPeers = args->nPeers;
+    netAttr.sendCommAttr.minConcurrentPeers = args->nPeers;
+    netAttr.sendCommAttr.maxFlowsPerPeer = args->nChannels;
+    netAttr.sendCommAttr.minFlowsPerPeer = args->nChannels;
+  } else {
+    netAttr.recvCommAttr.maxConcurrentPeers = args->nPeers;
+    netAttr.recvCommAttr.minConcurrentPeers = args->nPeers;
+    netAttr.recvCommAttr.maxFlowsPerPeer = args->nChannels;
+    netAttr.recvCommAttr.minFlowsPerPeer = args->nChannels;
+  }
+
+  netAttr.op = BIT(args->collAPI);
+  // algo/proto are undefined for p2p
+  if (args->collAPI < NCCL_NUM_FUNCTIONS) {
+    netAttr.algo = BIT(args->algorithm);
+    netAttr.proto = BIT(args->protocol);
+  }
+
+  if (memcmp(&proxyState->netAttr, &netAttr, sizeof(netAttr))) {
+    setNetAttrs(proxyState, &netAttr);
+    printNetAttrs(&netAttr, send ? "send" : "recv");
+  }
+}
+
 // Forward declaration
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args);
 
@@ -201,7 +319,9 @@ static ncclResult_t sendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
 
   int proxyRank;
   int64_t netId;
-  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, peerInfo->rank, &netId, &req.netDev, &proxyRank));
+  int64_t backupNetId;
+  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, peerInfo->rank, &netId, &req.netDev, &backupNetId, &req.backupNetDev, &proxyRank));
+  ncclIbBackupDevs[req.netDev] = req.backupNetDev;
   NCCLCHECK(ncclTopoCheckGdr(comm->topo, myInfo->rank, netId, 1, &req.useGdr));
   send->conn.flags |= req.useGdr ? NCCL_DIRECT_NIC : 0;
   if (!req.useGdr && connIndex == 0) comm->useGdr = 0;
@@ -214,14 +334,16 @@ static ncclResult_t sendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   NCCLCHECK(ncclProxyCallBlocking(comm, &send->proxyConn, ncclProxyMsgSetup, &req, sizeof(req), NULL, 0));
 
   if (proxyRank == myInfo->rank) {
-    INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [send] via NET/%s/%d%s%s%s", channelId, connIndex, myInfo->rank, myInfo->nvmlDev, peerInfo->rank, peerInfo->nvmlDev, comm->ncclNet->name, req.netDev,
+    INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [send] via NET/%s/%d%s%s%s(backupNetDev %d)", channelId, connIndex, myInfo->rank, myInfo->nvmlDev, peerInfo->rank, peerInfo->nvmlDev, comm->ncclNet->name, req.netDev,
         req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
-        req.shared ? "/Shared" : "");
+        req.shared ? "/Shared" : "", req.backupNetDev);
+    send->noUsePxnTransport = true;
   } else {
-    INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [send] via NET/%s/%d(%d)%s%s%s", channelId, connIndex, myInfo->rank, myInfo->nvmlDev, peerInfo->rank, peerInfo->nvmlDev, comm->ncclNet->name, req.netDev,
+    INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [send] via NET/%s/%d(%d)%s%s%s(backupNetDev %d)", channelId, connIndex, myInfo->rank, myInfo->nvmlDev, peerInfo->rank, peerInfo->nvmlDev, comm->ncclNet->name, req.netDev,
         proxyRank,
         req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
-        req.shared ? "/Shared" : "");
+        req.shared ? "/Shared" : "", req.backupNetDev);
+    send->noUsePxnTransport = false;
   }
   *((int*)connectInfo) = comm->topParentRanks[proxyRank];
   memcpy((uint8_t*)connectInfo + sizeof(ncclNetHandle_t), &req.useGdr, sizeof(int));
@@ -244,7 +366,9 @@ static ncclResult_t recvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   // Use myInfo->rank as the receiver uses its own NIC
   int proxyRank;
   int64_t netId;
-  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, myInfo->rank, &netId, &req.netDev, &proxyRank));
+  int64_t backupNetId;
+  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, myInfo->rank, &netId, &req.netDev, &backupNetId, &req.backupNetDev, &proxyRank));
+  ncclIbBackupDevs[req.netDev] = req.backupNetDev;
   NCCLCHECK(ncclTopoCheckGdr(comm->topo, myInfo->rank, netId, 0, &req.useGdr));
   recv->conn.flags |= req.useGdr ? NCCL_DIRECT_NIC : 0;
   if (!req.useGdr && connIndex == 0) comm->useGdr = 0;
@@ -260,9 +384,17 @@ static ncclResult_t recvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   req.tpRemoteRank = comm->topParentRanks[peerInfo->rank];
   NCCLCHECK(ncclProxyCallBlocking(comm, &recv->proxyConn, ncclProxyMsgSetup, &req, sizeof(req), connectInfo, sizeof(ncclNetHandle_t)));
   memcpy((uint8_t*)connectInfo + sizeof(ncclNetHandle_t), &req.useGdr, sizeof(int));
-  INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [receive] via NET/%s/%d%s%s%s", channelId, connIndex, peerInfo->rank, peerInfo->nvmlDev, myInfo->rank, myInfo->nvmlDev, comm->ncclNet->name, req.netDev,
+  INFO(NCCL_INIT|NCCL_NET,"Channel %02d/%d : %d[%d] -> %d[%d] [receive] via NET/%s/%d%s%s%s (backupNetDev %d)", channelId, connIndex, peerInfo->rank, peerInfo->nvmlDev, myInfo->rank, myInfo->nvmlDev, comm->ncclNet->name, req.netDev,
       req.useGdr ? "/GDRDMA" : "", req.useGdr==ncclTopoGdrModePci ? "(PCI)" : "",
-      req.shared ? "/Shared" : "");
+      req.shared ? "/Shared" : "", req.backupNetDev);
+
+  if (ncclPxnDisable(comm) ||
+      (comm->rankToLocalRank[peerInfo->rank] == comm->rankToLocalRank[myInfo->rank])) {
+    recv->noUsePxnTransport = true;
+  }
+  else {
+    recv->noUsePxnTransport = false;
+  }
   return ncclSuccess;
 }
 
@@ -306,11 +438,12 @@ static ncclResult_t netDumpMap(struct connectMap* map) {
 
 struct netSendConnectArgs {
   ncclNetHandle_t handle;
-  int trafficClass;
+  ncclNetAttr_t netAttr;
 };
 
 struct netRecvConnectArgs {
   int proxyRank;
+  ncclNetAttr_t netAttr;
 };
 
 static ncclResult_t sendConnect(struct ncclComm* comm, struct ncclConnect* connectInfo, int nranks, int rank, struct ncclConnector* send) {
@@ -330,7 +463,9 @@ static ncclResult_t sendConnect(struct ncclComm* comm, struct ncclConnect* conne
     INFO(NCCL_PROXY, "sendConnect ncclProxyCallAsync opId=%p", opId);
     netSendConnectArgs args = {0};
     memcpy(&args.handle, connectInfo, sizeof(ncclNetHandle_t));
-    args.trafficClass = comm->config.trafficClass;
+
+    populateCommNetAttrs(comm, send, &args.netAttr);
+
     NCCLCHECK(ncclProxyCallAsync(comm, &send->proxyConn, ncclProxyMsgConnect, &args, sizeof(netSendConnectArgs), sizeof(struct connectMap), opId));
   } else {
     opId =  send;
@@ -441,6 +576,9 @@ static ncclResult_t recvConnect(struct ncclComm* comm, struct ncclConnect* conne
        opId, &recv->proxyConn, connectInfo);
     netRecvConnectArgs args = {0};
     args.proxyRank = *((int*)connectInfo);
+
+    populateCommNetAttrs(comm, recv, &args.netAttr);
+
     NCCLCHECK(ncclProxyCallAsync(comm, &recv->proxyConn, ncclProxyMsgConnect, &args, sizeof(netRecvConnectArgs), sizeof(struct connectMap), opId));
   } else {
     opId = recv;
@@ -617,20 +755,28 @@ static ncclResult_t sendProxySetup(struct ncclProxyConnection* connection, struc
   resources->tpLocalRank = req->tpLocalRank;
   resources->tpRemoteRank = req->tpRemoteRank;
   resources->netDev = req->netDev;
+  // backup net dev
+  resources->backupNetDev = req->backupNetDev;
   resources->shared = connection->shared = req->shared;
   resources->useGdr = req->useGdr;
   resources->channelId = req->channelId;
   resources->connIndex = req->connIndex;
   ncclNetProperties_t props;
   NCCLCHECK(proxyState->ncclNet->getProperties(req->netDev, &props));
+  // backup props
+  ncclNetProperties_t backupProps;
+  NCCLCHECK(proxyState->ncclNet->getProperties(req->backupNetDev, &backupProps));
   /* DMA-BUF support */
   resources->useDmaBuf = resources->useGdr && proxyState->dmaBufSupport && (props.ptrSupport & NCCL_PTR_DMABUF);
   resources->maxRecvs = props.maxRecvs;
   resources->netDeviceVersion = props.netDeviceVersion;
   resources->netDeviceType = props.netDeviceType;
+  /* backup DMA-BUF support */
+  resources->backupUseDmaBuf = resources->useGdr && proxyState->dmaBufSupport && (backupProps.ptrSupport & NCCL_PTR_DMABUF);
+  resources->backupMaxRecvs = backupProps.maxRecvs;
+  resources->backupNetDeviceVersion = backupProps.netDeviceVersion;
+  resources->backupNetDeviceType = backupProps.netDeviceType;
 
-  resources->netDeviceVersion = props.netDeviceVersion;
-  resources->netDeviceType = props.netDeviceType;
   /* point-to-point size limits*/
   resources->maxP2pBytes = props.maxP2pBytes;
   if((resources->maxP2pBytes <= 0) || (resources->maxP2pBytes > NCCL_MAX_NET_SIZE_BYTES)) {
@@ -657,6 +803,8 @@ static ncclResult_t recvProxySetup(struct ncclProxyConnection* connection, struc
   resources->tpLocalRank = req->tpLocalRank;
   resources->tpRemoteRank = req->tpRemoteRank;
   resources->netDev = req->netDev;
+  // backup net dev
+  resources->backupNetDev = req->backupNetDev;
   resources->shared = connection->shared = req->shared;
   resources->useGdr = req->useGdr;
   resources->needFlush = req->needFlush;
@@ -664,11 +812,20 @@ static ncclResult_t recvProxySetup(struct ncclProxyConnection* connection, struc
   resources->connIndex = req->connIndex;
   ncclNetProperties_t props;
   NCCLCHECK(proxyState->ncclNet->getProperties(req->netDev, &props));
+  // backup props
+  ncclNetProperties_t backupProps;
+  NCCLCHECK(proxyState->ncclNet->getProperties(req->backupNetDev, &backupProps));
   /* DMA-BUF support */
   resources->useDmaBuf = resources->useGdr && proxyState->dmaBufSupport && (props.ptrSupport & NCCL_PTR_DMABUF);
   resources->maxRecvs = props.maxRecvs;
   resources->netDeviceVersion = props.netDeviceVersion;
   resources->netDeviceType = props.netDeviceType;
+
+  /* backup DMA-BUF support */
+  resources->backupUseDmaBuf = resources->useGdr && proxyState->dmaBufSupport && (backupProps.ptrSupport & NCCL_PTR_DMABUF);
+  resources->backupMaxRecvs = backupProps.maxRecvs;
+  resources->backupNetDeviceVersion = backupProps.netDeviceVersion;
+  resources->backupNetDeviceType = backupProps.netDeviceType;
   /* point-to-point size limits*/
   resources->maxP2pBytes = props.maxP2pBytes;
   if((resources->maxP2pBytes <= 0) || (resources->maxP2pBytes > NCCL_MAX_NET_SIZE_BYTES)) {
@@ -678,7 +835,7 @@ static ncclResult_t recvProxySetup(struct ncclProxyConnection* connection, struc
   }
 
   if (respSize != sizeof(ncclNetHandle_t)) return ncclInternalError;
-  NCCLCHECK(proxyState->ncclNet->listen(req->netDev, respBuff, &resources->netListenComm));
+  NCCLCHECK(proxyState->ncclNet->listen(proxyState->netContext, req->netDev, respBuff, &resources->netListenComm));
   *done = 1;
 
   return ncclSuccess;
@@ -708,11 +865,12 @@ static ncclResult_t ncclNetGetDeviceHandle(ncclNetDeviceType type, int version, 
 
 static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
   struct sendNetResources* resources = (struct sendNetResources*)(connection->transportResources);
-  ncclNetCommConfig_t commConfig = {0};
   if (reqSize != sizeof(netSendConnectArgs)) return ncclInternalError;
   ncclResult_t ret = ncclSuccess;
   netSendConnectArgs* req = (netSendConnectArgs*) reqBuff;
-  commConfig.trafficClass = req->trafficClass == NCCL_CONFIG_UNDEF_INT ? NCCL_NET_TRAFFIC_CLASS_UNDEF : req->trafficClass;
+
+  setNetAttrs(proxyState, &req->netAttr);
+
   NCCLCHECK(ncclNetGetDeviceHandle(resources->netDeviceType, resources->netDeviceVersion, false /*isRecv*/, &resources->netDeviceHandle));
   if (resources->shared) {
     // Shared buffers
@@ -732,24 +890,38 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
         NCCLCHECK(ncclCalloc(progressState->netComms + resources->netDev, proxyState->tpnRanks));
       }
       struct ncclSharedNetComms* comms = progressState->netComms[resources->netDev] + resources->tpRemoteRank;
-      if (comms->sendComm[resources->channelId] == NULL) ret = proxyState->ncclNet->connect(resources->netDev, &commConfig, req->handle, comms->sendComm + resources->channelId, &resources->netDeviceHandle);
+      // let only one localrank connect to a tpRemoteRank to avoid duplicate connections
+      if (comms->activeConnect[resources->channelId] == 0)
+        comms->activeConnect[resources->channelId] = (resources->tpLocalRank + 1);
+      if (comms->sendComm[resources->channelId] == NULL
+          && comms->activeConnect[resources->channelId] == (resources->tpLocalRank + 1)) {
+        ret = proxyState->ncclNet->connect(proxyState->netContext, resources->netDev, req->handle,
+            comms->sendComm + resources->channelId, &resources->netDeviceHandle);
+      }
       resources->netSendComm = comms->sendComm[resources->channelId];
       if (comms->sendComm[resources->channelId]) comms->sendRefCount[resources->channelId]++;
     } else {
-      ret = proxyState->ncclNet->connect(resources->netDev, &commConfig, req->handle, &resources->netSendComm, &resources->netDeviceHandle);
+      ret = proxyState->ncclNet->connect(proxyState->netContext, resources->netDev, req->handle, &resources->netSendComm, &resources->netDeviceHandle);
     }
   } else {
     // Connect to remote peer
-    ret = proxyState->ncclNet->connect(resources->netDev, &commConfig, req->handle, &resources->netSendComm, &resources->netDeviceHandle);
+    ret = proxyState->ncclNet->connect(proxyState->netContext, resources->netDev, req->handle, &resources->netSendComm, &resources->netDeviceHandle);
     connection->proxyAppendPtr = &connection->proxyAppend;
   }
 
-  NCCLCHECK(ret);
+  if (ret != ncclSuccess) {
+    if (resources->netSendComm) proxyState->ncclNet->closeSend(resources->netSendComm);
+    NCCLCHECK(ret);
+  }
   if (resources->netSendComm == NULL) {
     *done = 0;
     return ncclInProgress;
   }
+  printNetAttrs(&req->netAttr, "send connect");
   *done = 1;
+
+  if (proxyState->ncclNet == &ncclNetIb)
+    NCCLCHECK(saveChannelToQp(resources->netSendComm, resources->channelId));
 
   if (resources->netDeviceHandle) {
     connection->netDeviceHandle = resources->netDeviceHandle;
@@ -866,6 +1038,8 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
   resources->tpRemoteProxyRank = req->proxyRank;
   ncclResult_t ret = ncclSuccess;
 
+  setNetAttrs(proxyState, &req->netAttr);
+
   NCCLCHECK(ncclNetGetDeviceHandle(resources->netDeviceType, resources->netDeviceVersion, true /*isRecv*/, &resources->netDeviceHandle));
   // Finish connection establishment from remote peer
   if (resources->shared) {
@@ -886,7 +1060,15 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
         NCCLCHECK(ncclCalloc(progressState->netComms + resources->netDev, proxyState->tpnRanks));
       }
       struct ncclSharedNetComms* comms = progressState->netComms[resources->netDev] + resources->tpRemoteProxyRank;
-      if (comms->recvComm[resources->channelId] == NULL) ret = proxyState->ncclNet->accept(resources->netListenComm, comms->recvComm+resources->channelId, &resources->netDeviceHandle);
+      // reuse handle to for netdev/remote rank to avoid duplicate connections
+      if (comms->activeAccept[resources->channelId] == 0)
+        comms->activeAccept[resources->channelId] = (resources->tpLocalRank + 1);
+      //try connecting while comm is null
+      if (comms->recvComm[resources->channelId] == NULL
+         && comms->activeAccept[resources->channelId] == (resources->tpLocalRank + 1)) {
+        ret = proxyState->ncclNet->accept(resources->netListenComm,
+            comms->recvComm+resources->channelId, &resources->netDeviceHandle);
+      }
       resources->netRecvComm = comms->recvComm[resources->channelId];
       if (comms->recvComm[resources->channelId]) comms->recvRefCount[resources->channelId]++;
     } else {
@@ -903,6 +1085,7 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
     *done = 0;
     return ncclInProgress;
   }
+  printNetAttrs(&req->netAttr, "recv connect");
   *done = 1;
 
   if (resources->netDeviceHandle) {
@@ -1091,7 +1274,141 @@ static ncclResult_t recvProxyFree(struct ncclProxyConnection* connection, struct
 
 static_assert(NCCL_STEPS <= NCCL_NET_MAX_REQUESTS, "Not enough net requests to cover for steps");
 
+extern void ncclIbTestOutput(struct ncclIbRequest *r);
+
+extern ncclResult_t _ncclIbFreeRequest(void *r);
+extern ncclResult_t ncclIbCheckSyncFifo(void *sendComm, uint64_t &recvFifoTail, uint64_t &restartPos, int &errPortIdx);
+extern ncclResult_t ncclIbChangeFifoHead(void *sendComm, uint64_t _FifoHead);
+extern ncclResult_t ncclIbGetReqSize(void *request, int *sizes);
+extern ncclResult_t ncclIbCheckSubSyncFifo(void *sendComm, bool &if_rollback);
+extern ncclResult_t ncclIbRefreshDevState(void *comm, bool if_send, bool ifsendrecv);
+extern ncclResult_t ncclIbReTransitionQpAndCq(void *comm, bool if_send);
+extern ncclResult_t ncclIbCheckIfNeedStreamSync(void *comm, bool if_send, bool &needStreamSync);
+extern ncclResult_t ncclIbResetQpIndex(void *comm, bool if_send);
+
+ncclResult_t ncclIbCheckIfNeedSync(void *transportResources, bool if_send, bool &needStreamSync) {
+  if (if_send) {
+    struct sendNetResources *resources = (struct sendNetResources *)(transportResources);
+    NCCLCHECK(ncclIbCheckIfNeedStreamSync(resources->netSendComm, true, needStreamSync));
+  }
+  else {
+    struct recvNetResources *resources = (struct recvNetResources *)(transportResources);
+    NCCLCHECK(ncclIbCheckIfNeedStreamSync(resources->netRecvComm, false, needStreamSync));
+  }
+  return ncclSuccess;
+}
+
+ncclResult_t ncclIbRefreshState(void *transportResources, bool if_send, bool ifsendrecv) {
+  if (if_send) {
+    struct sendNetResources *resources = (struct sendNetResources *)(transportResources);
+    NCCLCHECK(ncclIbRefreshDevState(resources->netSendComm, true, ifsendrecv));
+  }
+  else {
+    struct recvNetResources *resources = (struct recvNetResources *)(transportResources);
+    NCCLCHECK(ncclIbRefreshDevState(resources->netRecvComm, false, ifsendrecv));
+  }
+
+  return ncclSuccess;
+}
+
+ncclResult_t ncclIbCheckConnector(ncclConnector *conn, bool &if_fill) {
+  if (conn->proxyConn.proxyProgress == recvProxyProgress || conn->proxyConn.proxyProgress == sendProxyProgress) {
+    if_fill = true;
+  }
+  else {
+    if_fill = false;
+  }
+  return ncclSuccess;
+}
+
+static ncclResult_t ncclIbRollBackSendProxyProgress(struct ncclProxyState *proxyState, struct ncclProxyArgs *args, void *sendComm) {
+  bool ifReTransition = false;
+  NCCLCHECK(ncclIbResetQpIndex(sendComm, true));
+  for (int ts = 0; ts < args->nsubs; ts++) {
+    struct ncclProxySubArgs *t_sub = args->subs + ts;
+    struct sendNetResources *resources = (struct sendNetResources *)(t_sub->connection->transportResources);
+    volatile struct ncclConnFifo *connFifo = (volatile struct ncclConnFifo *)resources->recvMem->connFifo;
+
+    // roll back the sub with same sendComm
+    if (resources->netSendComm != sendComm)
+      continue;
+
+    uint64_t recvFifoTail;
+    uint64_t restartPos;
+    int errPortIdx;
+    NCCLCHECK(ncclIbCheckSyncFifo(resources->netSendComm, recvFifoTail, restartPos, errPortIdx));
+    NCCLCHECK(ncclIbChangeFifoHead(resources->netSendComm, recvFifoTail));
+    if (!ifReTransition) {
+      NCCLCHECK(ncclIbReTransitionQpAndCq(resources->netSendComm, true));
+      ifReTransition = true;
+    }
+
+    INFO(NCCL_INIT, "sendProxy (channelId %d: myRank %d -> peerRank %d) failed, subCnt: %d, the step of transmitted (%ld) is rolled back to the step of done (%ld) pre done(%ld),fifoHead(%ld), coll(%d), comm(%p)",
+         t_sub->channelId,
+         proxyState->tpRank,
+         t_sub->peer,
+         ts,
+         t_sub->transmitted,
+         restartPos,
+         t_sub->done,
+         recvFifoTail,
+         args->coll,
+         sendComm);
+
+    // you complete t_sub->transmitted to restartPos, which haven't been tested
+    for (int t_b = t_sub->done; t_b < restartPos; t_b += args->sliceSteps) {
+      int t_buffSlot = (t_b + t_sub->base) % NCCL_STEPS;
+
+      // finish the test done
+      int size;
+      NCCLCHECK(ncclIbGetReqSize(t_sub->requests[t_buffSlot], &size));
+      if (t_sub->reg) {
+        if (size < t_sub->nbytes) {
+          t_sub->recvbuff += size;
+          t_sub->nbytes -= size;
+          // Do one more step (at least)
+          t_sub->nsteps++;
+        }
+        else {
+          // Signal the GPU the send is complete and it can return.
+          connFifo[t_sub->base % NCCL_STEPS].size = -1;
+        }
+      }
+      // Make sure size is reset to -1 before we update the head.
+      connFifo[t_buffSlot].size = -1;
+      __sync_synchronize();
+
+      if (resources->shared == 0) {
+        volatile uint64_t *sendHead = resources->gdcSync ? resources->gdcSync : &resources->sendMem->head;
+        *sendHead = t_sub->base + t_b;
+        if (resources->gdcSync)
+          wc_store_fence(); // Flush out WC write
+      }
+      args->idle = 0;
+      if (t_b == t_sub->nsteps) {
+        if (t_sub->ringAlgo && t_sub->ringAlgo->decRefCount() == 0)
+          delete t_sub->ringAlgo;
+        t_sub->ringAlgo = NULL;
+        args->done++;
+      }
+    }
+
+    // free req and rollback the step of sub
+    for (int t_b = t_sub->done; t_b < t_sub->transmitted; t_b += args->sliceSteps) {
+      int t_buffSlot = (t_b + t_sub->base) % NCCL_STEPS;
+      _ncclIbFreeRequest(t_sub->requests[t_buffSlot]);
+    }
+
+    t_sub->transmitted = t_sub->done = restartPos;
+    t_sub->needRollback = false;
+    t_sub->hasRollback = true;
+  }
+  args->idle = 0;
+  return ncclSuccess;
+}
+
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
+  int checkedNetAttr = 0;
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
@@ -1101,7 +1418,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
       // Set step base for next op
       resources->step = sub->base + sub->nsteps;
       sub->posted = sub->transmitted = sub->done = 0;
-      ncclProfilerStartSendProxyOpEvent(s, args);
+      ncclProfilerRecordProxyOpEventState(s, args, ncclProfilerProxyOpInProgress_v4);
       if (!sub->reg)
         sub->sendMhandle = resources->mhandles[args->protocol];
     }
@@ -1121,6 +1438,19 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
       volatile struct ncclConnFifo* connFifo = (volatile struct ncclConnFifo*)resources->recvMem->connFifo;
       int stepSize = resources->buffSizes[p] / NCCL_STEPS;
       char* localBuff = NCCL_NET_MAP_GET_POINTER(&resources->map, cpu, buffs[p]);
+
+      // check if recv has changed to backup
+      if (!sub->hasRollback) {
+        bool rollback = false;
+        NCCLCHECK(ncclIbCheckSubSyncFifo(resources->netSendComm, rollback));
+        if (rollback) {
+          NCCLCHECK(ncclIbRollBackSendProxyProgress(proxyState, args, resources->netSendComm));
+          args->idle = 0;
+          return ncclSuccess;
+        }
+      }
+      // if send has received an error wc, return directly
+      if (sub->needRollback) continue;
       // Post buffers to the GPU
       if (sub->posted < sub->nsteps && sub->posted < sub->done + maxDepth) {
         ncclProfilerStartSendProxyStepEvent(s, args, postedStepId);
@@ -1140,7 +1470,6 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         } else {
           sub->posted += args->sliceSteps;
         }
-        ncclProfilerRecordProxyOpEventState(s, args, sub->posted, sub->transSize, ncclProfilerProxyOpSendPosted);
         ncclProfilerRecordProxyStepEventState(s, args, postedStepId, ncclProfilerProxyStepSendGPUWait);
         args->idle = 0;
         continue;
@@ -1188,18 +1517,27 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
             }
           }
           if (ready) {
-            ncclProfilerRecordProxyOpEventState(s, args, sub->transmitted+args->sliceSteps, sub->transSize, ncclProfilerProxyOpSendRemFifoWait);
+            ncclProfilerRecordProxyStepEventState(s, args, transmittedStepId, ncclProfilerProxyStepSendPeerWait_v4);
             // Data is ready, try to send.
             // Coverity complains about the size here as pointing to an out-of-scope temporary.  Which is nonsense,
             // since size is a plain integer.
             // coverity[use_invalid:FALSE]
-            NCCLCHECK(proxyState->ncclNet->isend(resources->netSendComm, buff, size, resources->tpRank, sub->sendMhandle, sub, sub->requests+buffSlot));
+            void* phandle = &sub->pHandles[DIVUP(transmittedStepId, args->sliceSteps)%NCCL_STEPS];
+            if (!checkedNetAttr++)
+              setXferNetAttrs(proxyState, args, 1);
+            // save message that is used for telemetry
+            if (proxyState->ncclNet == &ncclNetIb) {
+              NCCLCHECK(setCommunicationAlgorithm(resources->netSendComm, args->coll));
+              NCCLCHECK(setNcclFuncTimes(resources->netSendComm, args->ncclFuncTimes));
+              NCCLCHECK(setNcclPeerRank(resources->netSendComm, args->peerRank));
+              NCCLCHECK(setNcclRank(resources->netSendComm, args->rank));
+              NCCLCHECK(setNcclGroupHash(resources->netSendComm, args->groupHash));
+            }
+            NCCLCHECK(proxyState->ncclNet->isend(resources->netSendComm, buff, size, resources->tpRank, sub->sendMhandle, phandle, sub->requests+buffSlot));
             if (sub->requests[buffSlot] != NULL) {
               TRACE(NCCL_NET, "sendProxy [%ld/%d/%d] Isend posted, req %p, buff %p, size %d, proto %d, myRank %d, channelId %d, mhandle %p", sub->transmitted, buffSlot, sub->nsteps, sub->requests[buffSlot], buff, size, p, proxyState->tpRank, sub->channelId, sub->sendMhandle);
-              sub->transSize += size;
+              sub->transSize = size;
               sub->transmitted += args->sliceSteps;
-              sub->profilerSteps++;
-              ncclProfilerRecordProxyOpEventState(s, args, sub->transmitted, sub->transSize, ncclProfilerProxyOpSendTransmitted);
               ncclProfilerRecordProxyStepEventState(s, args, transmittedStepId, ncclProfilerProxyStepSendWait);
               args->idle = 0;
               continue;
@@ -1212,7 +1550,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         int done;
         int size;
         int buffSlot = (sub->base+sub->done)%NCCL_STEPS;
-        NCCLCHECK(proxyState->ncclNet->test(sub->requests[buffSlot], &done, &size));
+        int result = proxyState->ncclNet->test(sub->requests[buffSlot], &done, &size);
         if (done) {
           // Make sure size is reset to -1 before we update the head.
           connFifo[buffSlot].size = -1;
@@ -1220,7 +1558,6 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
           TRACE(NCCL_NET, "sendProxy [%ld/%d/%d] request %p done", sub->done, buffSlot, sub->nsteps, sub->requests[buffSlot]);
           sub->done += args->sliceSteps;
           ncclProfilerStopProxyStepEvent(s, args, doneStepId);
-          ncclProfilerRecordProxyOpEventState(s, args, sub->done, sub->transSize, ncclProfilerProxyOpSendDone);
 
           if (resources->shared == 0) {
             volatile uint64_t* sendHead = resources->gdcSync ? resources->gdcSync : &resources->sendMem->head;
@@ -1232,6 +1569,21 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
             args->done++;
             if (sub->ringAlgo && sub->ringAlgo->decRefCount() == 0) delete sub->ringAlgo;
             sub->ringAlgo = NULL;
+          }
+        }
+        else {
+          if (ncclParamEnableFaultTolerance() && result != ncclSuccess) {
+            // change the sub with same sendComm to rollback state
+            for (int i = 0; i < args->nsubs; i++) {
+              struct ncclProxySubArgs *t_sub = args->subs + i;
+              struct sendNetResources *t_resources = (struct sendNetResources *)(t_sub->connection->transportResources);
+
+              if (t_resources->netSendComm != resources->netSendComm)
+                continue;
+
+              t_sub->needRollback = true;
+            }
+            return ncclSuccess;
           }
         }
       }
@@ -1246,7 +1598,11 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
   return ncclSuccess;
 }
 
+extern ncclResult_t ncclIbPostSyncFifo(void *recvComm, uint64_t restartPos, int errPortIdx);
+extern ncclResult_t ncclIbGetErrorPortIdx(void *request, int &idx);
+
 static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
+  int checkedNetAttr = 0;
   if (args->state == ncclProxyOpReady) {
     // Initialize subs and group them by same recvComm.
     void* recvComm;
@@ -1282,7 +1638,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
       sub->posted = sub->received = sub->transmitted = sub->done = 0;
       sub->regBufferReady = 0;
       for (int i=0; i<groupSize; i++) sub[-i].groupSize = groupSize;
-      ncclProfilerStartRecvProxyOpEvent(s, args);
+      ncclProfilerRecordProxyOpEventState(s, args, ncclProfilerProxyOpInProgress_v4);
       if (!sub->reg)
         sub->recvMhandle = resources->mhandles[args->protocol];
     }
@@ -1343,7 +1699,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
           if (sub->nbytes < sizes[subCount]) sizes[subCount] = sub->nbytes;
           tags[subCount] = resources->tpRemoteRank;
           mhandles[subCount] = sub->recvMhandle;
-          phandles[subCount] = sub;
+          phandles[subCount] = &sub->pHandles[DIVUP(postedStepId, args->sliceSteps)%NCCL_STEPS];
           subCount++;
         }
       }
@@ -1352,6 +1708,8 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         struct recvNetResources* resources = (struct recvNetResources*) (subGroup->connection->transportResources);
         void** requestPtr = subGroup->requests+(step%NCCL_STEPS);
         bool ignoreCompletion = ncclParamNetOptionalRecvCompletion() && ((args->protocol == NCCL_PROTO_LL128) || (args->protocol == NCCL_PROTO_LL)) && (subCount == 1);
+        if (!checkedNetAttr++)
+          setXferNetAttrs(proxyState, args, 0);
         if (ignoreCompletion) *requestPtr = (void *)NCCL_NET_OPTIONAL_RECV_COMPLETION;
         NCCLCHECK(proxyState->ncclNet->irecv(resources->netRecvComm, subCount, ptrs, sizes, tags, mhandles, phandles, requestPtr));
         if (*requestPtr) {
@@ -1362,8 +1720,6 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
             int postedStepId = sub->posted;
             TRACE(NCCL_NET, "recvProxy [%ld/%ld/%d] Irecv posted, buff %p, size %ld, myRank %d, channelId %d, mhandle %p", sub->posted, (sub->base + sub->posted) % NCCL_STEPS, sub->nsteps, ptrs[i], sizes[i], proxyState->tpRank, sub->channelId, mhandles[i]);
             sub->posted += args->sliceSteps;
-            sub->profilerSteps++;
-            ncclProfilerRecordProxyOpEventState(s+i, args, sub->posted, sub->transSize, ncclProfilerProxyOpRecvPosted);
             ncclProfilerRecordProxyStepEventState(s+i, args, postedStepId, ncclProfilerProxyStepRecvWait);
           }
           args->idle = 0;
@@ -1381,7 +1737,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         int sizes[NCCL_PROXY_MAX_SUBS];
         void* mhandles[NCCL_PROXY_MAX_SUBS];
         for (int i=0; i<NCCL_PROXY_MAX_SUBS; i++) sizes[i] = 0;
-        NCCLCHECK(proxyState->ncclNet->test(subGroup->requests[step%NCCL_STEPS], &done, sizes));
+        int result = proxyState->ncclNet->test(subGroup->requests[step%NCCL_STEPS], &done, sizes);
         if (done) {
           int needFlush = 0;
           int totalSize = 0;
@@ -1393,9 +1749,8 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
             struct recvNetResources* resources = (struct recvNetResources*)(sub->connection->transportResources);
             volatile struct ncclConnFifo* connFifo = (volatile struct ncclConnFifo*)resources->recvMem->connFifo;
             connFifo[buffSlot].size = -1;
-            sub->transSize += sizes[i];
+            sub->transSize = sizes[i];
             sub->received += args->sliceSteps;
-            ncclProfilerRecordProxyOpEventState(s+i, args, sub->received, sub->transSize, ncclProfilerProxyOpRecvReceived);
             ncclProfilerRecordProxyStepEventState(s+i, args, receivedStepId, ncclProfilerProxyStepRecvFlushWait);
             if (step < sub->nsteps) {
               struct recvNetResources* resources = (struct recvNetResources*) (sub->connection->transportResources);
@@ -1442,6 +1797,48 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
           }
           args->idle = 0;
         }
+        else {
+          if (ncclParamEnableFaultTolerance() && result != ncclSuccess) {
+            int errPortIdx;
+            NCCLCHECK(ncclIbGetErrorPortIdx(subGroup->requests[subGroup->received % NCCL_STEPS], errPortIdx));
+            struct recvNetResources *error_resources = (struct recvNetResources *)(subGroup->connection->transportResources);
+            NCCLCHECK(ncclIbResetQpIndex(error_resources->netRecvComm, false));
+
+            for (int s = 0; s < args->nsubs; s += args->subs[s].groupSize) {
+              struct ncclProxySubArgs *t_subGroup = args->subs + s;
+              // roll back the sub with same recvComm
+              struct recvNetResources *t_resources = (struct recvNetResources *)(t_subGroup->connection->transportResources);
+              if (t_resources->netRecvComm != error_resources->netRecvComm) continue;
+
+              for (int t_b = t_subGroup->received; t_b < t_subGroup->posted; t_b += args->sliceSteps) {
+                int t_buffSlot = t_b % NCCL_STEPS;
+                _ncclIbFreeRequest(t_subGroup->requests[t_buffSlot]);
+              }
+
+              for (int i = 0; i < t_subGroup->groupSize; i++) {
+                struct ncclProxySubArgs *t_sub = t_subGroup + i;
+                struct recvNetResources *resources = (struct recvNetResources *)(t_sub->connection->transportResources);
+
+                INFO(NCCL_INIT, "recvProxy/iflush (channelId %d: myRank %d -> peerRank %d) failed, subGroup: %d, subCnt: %d, the step of posted (%ld) is rolled back to the step of received (%ld), coll(%d), comm(%p)",
+                     t_sub->channelId,
+                     proxyState->tpRank,
+                     t_sub->peer,
+                     s,
+                     i,
+                     t_sub->posted,
+                     t_sub->received,
+                     args->coll,
+                     resources->netRecvComm);
+
+                t_sub->posted = t_sub->received;
+                NCCLCHECK(ncclIbPostSyncFifo(resources->netRecvComm, t_sub->received, errPortIdx));
+                if (i == 0) NCCLCHECK(ncclIbReTransitionQpAndCq(resources->netRecvComm, false));
+              }
+            }
+            args->idle = 0;
+            return ncclSuccess;
+          }
+        }
       }
     }
     if (args->idle == 0) return ncclSuccess;
@@ -1452,14 +1849,14 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         uint64_t step = subGroup->transmitted;
         int done = 1;
         void* request = subGroup->requests[step%NCCL_STEPS];
-        if (request) NCCLCHECK(proxyState->ncclNet->test(request, &done, NULL));
+        int result = ncclSuccess;
+        if (request) result = proxyState->ncclNet->test(request, &done, NULL);
         if (done) {
           for (int i=0; i<subGroup->groupSize; i++) {
             struct ncclProxySubArgs* sub = subGroup + i;
             int transmittedStepId = sub->transmitted;
 
             sub->transmitted += args->sliceSteps;
-            ncclProfilerRecordProxyOpEventState(s+i, args, sub->transmitted, sub->transSize, ncclProfilerProxyOpRecvTransmitted);
             ncclProfilerRecordProxyStepEventState(s+i, args, transmittedStepId, ncclProfilerProxyStepRecvGPUWait);
             if (step < sub->nsteps) {
               __sync_synchronize();
@@ -1471,6 +1868,30 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
           }
           args->idle = 0;
         }
+        else {
+          if (ncclParamEnableFaultTolerance() && result != ncclSuccess) {
+            for (int s = 0; s < args->nsubs; s += args->subs[s].groupSize) {
+              struct ncclProxySubArgs *t_subGroup = args->subs + s;
+              for (int t_b = t_subGroup->transmitted; t_b < t_subGroup->received; t_b += args->sliceSteps) {
+                int t_buffSlot = t_b % NCCL_STEPS;
+                _ncclIbFreeRequest(t_subGroup->requests[t_buffSlot]);
+              }
+              for (int i = 0; i < t_subGroup->groupSize; i++) {
+                struct ncclProxySubArgs *t_sub = t_subGroup + i;
+
+                t_sub->received = t_sub->transmitted;
+                INFO(NCCL_INIT, "recvProxy/iflush (channelId %d: myRank %d -> peerRank %d) failed, the step of received (%ld) is rolled back to the step of transmitted (%ld)",
+                     t_sub->channelId,
+                     args->peerRank,
+                     proxyState->tpRank,
+                     t_sub->received,
+                     t_sub->transmitted);
+              }
+            }
+            args->idle = 0;
+            return ncclSuccess;
+          }
+        }
       }
     }
     if (args->idle == 0) return ncclSuccess;
@@ -1479,7 +1900,6 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
       struct ncclProxySubArgs* subGroup = args->subs+s;
       for (int i=0; i<subGroup->groupSize; i++) {
         struct ncclProxySubArgs* sub = subGroup + i;
-        int doneStepId = sub->done;
         if (sub->done == sub->nsteps) continue;
         if (sub->transmitted > sub->done) {
           struct recvNetResources* resources = (struct recvNetResources*) (sub->connection->transportResources);
@@ -1494,9 +1914,9 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
                 NCCLCHECK(proxyState->ncclNet->irecvConsumed(resources->netRecvComm, subGroup->recvRequestsSubCount, subGroup->recvRequestsCache[sub->done%NCCL_STEPS]));
               subGroup->recvRequestsCache[sub->done%NCCL_STEPS] = NULL;
             }
+            int doneStepId = sub->done;
             sub->done += args->sliceSteps;
             ncclProfilerStopProxyStepEvent(s+i, args, doneStepId);
-            ncclProfilerRecordProxyOpEventState(s+i, args, sub->done, sub->transSize, ncclProfilerProxyOpRecvDone);
             args->idle = 0;
             if (sub->done == sub->nsteps) {
               args->done++;
@@ -1547,9 +1967,9 @@ static ncclResult_t netRegisterBuffer(ncclComm* comm, const void* userbuff, size
       if (found) {
         *outRegBufFlag = 1;
         outHandle[p] = netHandle->handle;
-        INFO(NCCL_REG, "rank %d - NET reuse buffer %p size %ld (baseAddr %p size %ld) handle %p", comm->rank, userbuff, buffSize, (void*)regRecord->addr, regRecord->pages * comm->regCache.pageSize, netHandle->handle);
+        INFO(NCCL_REG, "rank %d - NET reuse buffer %p size %ld (baseAddr %p size %ld) handle %p", comm->rank, userbuff, buffSize, (void*)regRecord->begAddr, regRecord->endAddr - regRecord->begAddr, netHandle->handle);
       } else {
-        struct netRegInfo info = { regRecord->addr, regRecord->pages * comm->regCache.pageSize };
+        struct netRegInfo info = { regRecord->begAddr, regRecord->endAddr - regRecord->begAddr };
         void* handle = NULL;
 
         if (peerConn->conn.flags & NCCL_DIRECT_NIC) {
@@ -1588,13 +2008,18 @@ ncclResult_t ncclNetLocalRegisterBuffer(ncclComm* comm, const void* userbuff, si
   ncclResult_t ret = ncclSuccess;
   struct ncclReg *regRecord = NULL;
   bool isValid = false;
+  void *base = NULL;
+  size_t baseSize = 0;
 
   *outRegBufFlag = 0;
   if (comm && userbuff && buffSize > 0 && nPeers > 0) {
     NCCLCHECKGOTO(ncclRegFind(comm, userbuff, buffSize, &regRecord), ret, fail);
     NCCLCHECKGOTO(ncclRegLocalIsValid(regRecord, &isValid), ret, fail);
-    if (isValid)
+    if (isValid) {
+      CUCHECKGOTO(cuMemGetAddressRange((CUdeviceptr *)&base, &baseSize, (CUdeviceptr)userbuff), ret, fail);
+      if ((uint64_t)base + baseSize < (uint64_t)userbuff + buffSize) goto exit;
       NCCLCHECKGOTO(netRegisterBuffer(comm, userbuff, buffSize, peerConns, nPeers, regRecord, outRegBufFlag, outHandle), ret, fail);
+    }
   }
 
 exit:
@@ -1621,13 +2046,14 @@ ncclResult_t ncclNetGraphRegisterBuffer(ncclComm* comm, const void* userbuff, si
   ncclResult_t ret = ncclSuccess;
   struct ncclNetCleanupCallback *record = NULL;
   struct ncclReg *regRecord = NULL;
-  void *baseSend;
-  size_t baseSendSize;
+  void *base = NULL;
+  size_t baseSize = 0;
 
   *outRegBufFlag = 0;
   if (comm && userbuff && buffSize > 0 && nPeers > 0) {
-    CUCHECKGOTO(cuMemGetAddressRange((CUdeviceptr *)&baseSend, &baseSendSize, (CUdeviceptr)userbuff), ret, fail);
-    NCCLCHECKGOTO(ncclCommGraphRegister(comm, baseSend, baseSendSize, (void**)&regRecord), ret, fail);
+    CUCHECKGOTO(cuMemGetAddressRange((CUdeviceptr *)&base, &baseSize, (CUdeviceptr)userbuff), ret, fail);
+    if ((uint64_t)base + baseSize < (uint64_t)userbuff + buffSize) goto exit;
+    NCCLCHECKGOTO(ncclCommGraphRegister(comm, base, baseSize, (void**)&regRecord), ret, fail);
     NCCLCHECKGOTO(netRegisterBuffer(comm, userbuff, buffSize, peerConns, nPeers, regRecord, outRegBufFlag, outHandle), ret, fail);
     if (*outRegBufFlag) {
       NCCLCHECKGOTO(ncclCalloc(&record, 1), ret, fail);

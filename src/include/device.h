@@ -8,7 +8,7 @@
 #define NCCL_DEVICE_H_
 
 #include "nccl.h"
-#include "nccl_common.h"
+#include "nccl_tuner.h"
 #include "bitops.h"
 #include <algorithm>
 #include <stdint.h>
@@ -29,7 +29,31 @@ extern const char* ncclProtoStr[NCCL_NUM_PROTOCOLS];
   #define NCCL_CUDA_ARCH 0
 #endif
 
-#include "net_device.h"
+#ifdef __CUDA_ARCH_SPECIFIC__
+  #define NCCL_CUDA_ARCH_SPECIFIC __CUDA_ARCH_SPECIFIC__
+#elif defined(__CUDA_ARCH_HAS_FEATURE__)
+  #if __CUDA_ARCH_HAS_FEATURE__(SM90_ALL)
+    #define NCCL_CUDA_ARCH_SPECIFIC 900
+  #elif __CUDA_ARCH_HAS_FEATURE__(SM100_ALL)
+    #define NCCL_CUDA_ARCH_SPECIFIC 1000
+  #elif __CUDA_ARCH_HAS_FEATURE__(SM101_ALL)
+    #define NCCL_CUDA_ARCH_SPECIFIC 1010
+  #elif __CUDA_ARCH_HAS_FEATURE__(SM120_ALL)
+    #define NCCL_CUDA_ARCH_SPECIFIC 1200
+  #else
+    #define NCCL_CUDA_ARCH_SPECIFIC 0
+  #endif
+#else
+  #define NCCL_CUDA_ARCH_SPECIFIC 0
+#endif
+
+#ifdef __CUDA_ARCH_FAMILY_SPECIFIC__
+  #define NCCL_CUDA_ARCH_FAMILY_SPECIFIC __CUDA_ARCH_FAMILY_SPECIFIC__
+#else
+  #define NCCL_CUDA_ARCH_FAMILY_SPECIFIC 0
+#endif
+
+#include "nccl_device/net_device.h"
 
 enum ncclDevRedOp_t {
   ncclDevSum, ncclDevProd, ncclDevMinMax,
@@ -129,15 +153,18 @@ struct ncclProxyConnector {
   int sameProcess;
   struct ncclProxyConnection* connection;
   ncclResult_t (*proxyProgress)(struct ncclProxyState* proxyState, struct ncclProxyArgs*); // Copied from transport if necessary
+  ncclResult_t (*proxyGinProgress)(struct ncclProxyState* proxyState);
 };
 
 struct ncclConnector {
   int connected;
   int hasSeen;
+  int p2pOnly;
   struct ncclProxyConnector proxyConn;
   struct ncclTransportComm* transportComm;
   void* transportResources;
   struct ncclConnInfo conn;
+  bool noUsePxnTransport;
 };
 
 struct ncclRing {
@@ -196,14 +223,14 @@ struct ncclNvls {
 #define NCCL_MAX_ARITY NCCL_MAX_DIRECT_ARITY
 #endif
 
-#define NCCL_MAX_CONNS 2
+#define NCCL_MAX_CONNS 4
 struct ncclChannelPeer {
   struct ncclConnector send[NCCL_MAX_CONNS];
   struct ncclConnector recv[NCCL_MAX_CONNS];
   int refCount;
 };
 
-struct ncclDevComm;
+struct ncclKernelComm;
 
 struct alignas(16) ncclDevWorkP2p {
   void *sendAddr, *recvAddr;
@@ -242,16 +269,10 @@ inline __host__ uint8_t ncclP2pChannelBaseForRound(struct ncclComm* comm, int p2
 // ncclP2pChannelToPart and ncclP2pChannelForPart are inverses. The device code
 // uses ncclP2pChannelToPart to determine which part "this" channel is responsible for.
 inline __host__ int ncclP2pChannelForPart(int nP2pChannels, int base, int part) {
-  // Only works because nP2pChannels is pow2
-  int nChannelsLog2 = countOneBits(nP2pChannels-1);
-  int delta = reverseBits(part, nChannelsLog2);
-  return (base + delta) & (nP2pChannels-1);
+  return (base + part) & (nP2pChannels-1);
 }
 inline __device__ int ncclP2pChannelToPart(int nP2pChannels, int base, int channel) {
-  // Only works because nP2pChannels is pow2
-  int nChannelsLog2 = countOneBits(nP2pChannels-1);
-  int delta = (channel-base) & (nP2pChannels-1);
-  return reverseBits(delta, nChannelsLog2);
+  return (channel - base) & (nP2pChannels-1);
 }
 
 struct alignas(16) ncclDevWorkColl {
@@ -380,7 +401,15 @@ struct alignas(16) ncclDevChannel {
   uint64_t workCounter;
 };
 
-struct ncclDevComm {
+#define MAX_PROFILER_EVENTS_PER_CHANNEL 64
+struct ncclDevProfiler {
+  struct {
+    uint64_t counter;
+    uint64_t timestamp;
+  } data[MAX_PROFILER_EVENTS_PER_CHANNEL];
+};
+
+struct ncclKernelComm {
   int rank;
   int nRanks;
   int node;
@@ -388,9 +417,6 @@ struct ncclDevComm {
   int buffSizes[NCCL_NUM_PROTOCOLS];
   int p2pChunkSize;
   int isAllNvlink;
-
-  // Work fifo return credits
-  uint32_t* workConsumed/*[MAXCHANNELS]*/;
 
   int* collNetDenseToUserRank;
 
@@ -402,12 +428,12 @@ struct ncclDevComm {
   int* rankToLocalRank;
 
   // Profiler counters
-  uint64_t* workStarted/*[MAXCHANNELS]*/;
-  uint64_t* workCompleted/*[MAXCHANNELS]*/;
+  struct ncclDevProfiler* workStarted/*[MAXCHANNELS]*/;
+  struct ncclDevProfiler* workCompleted/*[MAXCHANNELS]*/;
 };
 
-struct alignas(16) ncclDevCommAndChannels {
-  struct ncclDevComm comm;
+struct alignas(16) ncclKernelCommAndChannels {
+  struct ncclKernelComm comm;
   struct ncclDevChannel channels[MAXCHANNELS];
 };
 
@@ -418,7 +444,7 @@ enum ncclDevWorkStorageType: uint8_t {
 };
 
 struct alignas(16) ncclDevKernelArgs {
-  struct ncclDevComm* comm;
+  struct ncclKernelComm* comm;
   uint64_t channelMask;
   enum ncclDevWorkStorageType workStorageType;
   uint32_t workMask;
@@ -476,7 +502,7 @@ __host__ __device__ constexpr int ncclCalcUnroll(int bytePerPack, int insns, int
 
 __host__ __device__ constexpr int ncclCollUnroll(int cudaArch = NCCL_CUDA_ARCH) {
   // Our collective unroll should move to the same bytes&insns model as NVLS.
-  return cudaArch >= 800 ? (cudaArch == 1200 ? 6 : 8) : 4;
+  return cudaArch >= 800 ? (cudaArch / 100 == 12 ? 6 : 8) : 4;
 }
 
 __host__ __device__ constexpr int ncclNvlsUnrollBytes(int cudaArch = NCCL_CUDA_ARCH) { return 4*16; }
@@ -504,10 +530,10 @@ __host__ __device__ constexpr int ncclShmemDynamicSize(int cudaArch = NCCL_CUDA_
 
 // Host-side table of kernel function pointers.
 extern int const ncclDevKernelCount;
-extern void* const ncclDevKernelList[/*ncclDevKernelCount*/];
+extern void* ncclDevKernelList[/*ncclDevKernelCount*/];
+extern int ncclDevKernelRequirements[/*ncclDevKernelCount*/];
 
 // Table of most specialized kernel function to run given func index.
-extern int const ncclDevFuncIdCount;
 extern int const ncclDevFuncRowToId[];
 extern void* const ncclDevKernelForFunc[/*funcIndex*/];
 extern bool const ncclDevKernelForFuncIsSpecialized[/*funcIndex*/];
@@ -535,11 +561,7 @@ inline bool ncclNvlsSupported(int devRedOp, int type) {
 
 // `ncclDevFuncIndex()` needs to be in sync with "all_functions()" in "src/device/generate.py"
 inline int ncclDevFuncId(int coll, int devRedOp, int type, int algo, int proto) {
-  #if defined(__CUDA_BF16_TYPES_EXIST__)
   constexpr int NumTypes = ncclNumTypes;
-  #else
-  constexpr int NumTypes = ncclNumTypes + 1;
-  #endif
   int row;
   do {
     row = 0; // ncclDevFuncIndex_P2p
@@ -564,7 +586,7 @@ inline int ncclDevFuncId(int coll, int devRedOp, int type, int algo, int proto) 
     }
     row += nAlgos*NCCL_NUM_PROTOCOLS;
 
-    nAlgos = 6;
+    nAlgos = 6; // TREE RING COLLNET_DIRECT COLLNET_CHAIN NVLS NVLS_TREE
     if (coll == ncclFuncAllReduce) {
       row += ((devRedOp*NumTypes + type)*nAlgos + algo)*NCCL_NUM_PROTOCOLS + proto;
       break;

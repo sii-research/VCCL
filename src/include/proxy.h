@@ -16,6 +16,7 @@
 #include "shmutils.h"
 #include "p2p.h"
 #include "collectives.h"
+#include "gin/gin_host.h"
 
 typedef enum : uint8_t {
   ncclPatternRing,
@@ -69,6 +70,7 @@ struct ncclProxyOp {
   uint8_t /*ncclDataType_t*/ dtype;
   uint8_t /*ncclDevRedOp_t*/ redOp;
   uint8_t /*ncclFunc_t*/ coll;
+  uint8_t /*ncclFunc_t*/ collAPI;
   uint8_t /*ncclPattern_t*/ pattern;
   uint8_t protocol;
   uint8_t algorithm;
@@ -81,6 +83,8 @@ struct ncclProxyOp {
   int isOneRPN;
   RingAlgorithm *ringAlgo;
   union ncclProxyOpSpecifics specifics;
+  int nChannels;
+  int nPeers;
 
   // Profiler plugin
   union {
@@ -103,6 +107,16 @@ struct ncclProxyOp {
   uint64_t workCounter;
 
   struct ncclProxyOp *enqNext;
+  unsigned long long ncclFuncTimes;
+  int peerRank;
+  uint64_t groupHash;
+};
+
+struct ncclProxySubArgs;
+
+struct ncclProxyEventHandle {
+  void* stepEventHandle;
+  struct ncclProxySubArgs* subArgPtr;
 };
 
 struct ncclProxySubArgs {
@@ -137,18 +151,21 @@ struct ncclProxySubArgs {
   // Profiler plugin
   int eActivationMask;
   int rank;
-  uint64_t profilerSteps;
   pid_t pid;
   void* profilerContext;
   void* taskEventHandle;
   void* opEventHandle;
   void* kernelEventHandle;
-  void* stepEventHandles[NCCL_STEPS];
+  struct ncclProxyEventHandle pHandles[NCCL_STEPS];
   size_t transSize;
   uint64_t workCounter;
 
   void* recvRequestsCache[NCCL_STEPS];
   int recvRequestsSubCount;
+
+  // use for backup rollback
+  bool needRollback;
+  bool hasRollback;
 };
 
 struct ncclProxyArgs {
@@ -169,11 +186,14 @@ struct ncclProxyArgs {
   uint8_t /*ncclDevRedOp_t*/ redOp;
   uint8_t /*ncclPattern_t*/ pattern;
   uint8_t /*ncclFunc_t*/ coll;
+  uint8_t /*ncclFunc_t*/ collAPI;
   uint8_t protocol;
   uint8_t algorithm;
   int state;
   char* sharedBuff[NCCL_STEPS];
   int sharedSize[NCCL_STEPS];
+  int nChannels;
+  int nPeers;
 
   int idle;
 
@@ -183,6 +203,10 @@ struct ncclProxyArgs {
   struct ncclProxyArgs** proxyAppendPtr;
 
   union ncclProxyOpSpecifics specifics;
+  unsigned long long ncclFuncTimes;
+  int peerRank;
+  int rank;
+  uint64_t groupHash;
 };
 #define NCCL_MAX_NETDEVS 128
 
@@ -226,6 +250,8 @@ struct ncclProxyPeer {
 };
 
 struct ncclSharedNetComms {
+  int activeConnect[MAXCHANNELS];
+  int activeAccept[MAXCHANNELS];
   void* sendComm[MAXCHANNELS];
   void* recvComm[MAXCHANNELS];
   int sendRefCount[MAXCHANNELS];
@@ -308,6 +334,8 @@ struct ncclProxyState {
   bool dmaBufSupport;
   ncclNet_t* ncclNet;
   ncclCollNet_t* ncclCollNet;
+  struct ncclGinState* ginState;
+
   uint32_t* abortFlag;
   bool directMode;
   // Service threads
@@ -329,6 +357,11 @@ struct ncclProxyState {
 
   // Progress thread
   struct ncclProxyProgressState progressState;
+
+  // Network plugin
+  void* netContext;
+  ncclNetAttr_t netAttr;
+  void* collNetContext;
 
   // Profiler plugin
   void* profilerContext;

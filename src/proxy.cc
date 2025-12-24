@@ -13,12 +13,15 @@
 #include "timer.h"
 #include "profiler.h"
 #include "transport.h"
+#include "cpuset.h"
 
 #include <sys/syscall.h>
 #include <assert.h>
 #include <unistd.h>
 #include <sys/time.h>
 #include <sched.h>
+#include <algorithm>
+#include "timer_log.h"
 
 #define NCCL_MAX_PROXY_CONNECTIONS (NCCL_MAX_LOCAL_RANKS+1)
 
@@ -376,6 +379,8 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   sub->recvMhandle = op->recvMhandle;
   sub->sendbuff = op->sendbuff;
   sub->recvbuff = op->recvbuff;
+  sub->needRollback = false;
+  sub->hasRollback = false;
   sub->eActivationMask = op->eActivationMask;
   sub->taskEventHandle = op->taskEventHandle;
   sub->rank = op->rank;
@@ -385,6 +390,8 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   sub->workCounter = op->workCounter;
   args->nsubs = subIndex+1;
   if (subIndex) {
+    args->nChannels = std::min(args->nChannels, op->nChannels);
+    args->nPeers = std::min(args->nPeers, op->nPeers);
     if ((args->sliceSteps != op->sliceSteps) ||
         (args->chunkSteps != op->chunkSteps) ||
         (args->protocol != op->protocol) ||
@@ -398,7 +405,7 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
       WARN("Proxy append on running operation");
       return ncclInternalError;
     }
-    return ncclSuccess;
+    goto exit;
   }
   //memset(&args->progress, 0, sizeof(struct ncclProxyArgs)-offsetof(struct ncclProxyArgs, progress));
   args->done = 0;
@@ -411,11 +418,20 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   args->pattern = op->pattern;
   args->protocol = op->protocol;
   args->coll = op->coll;
+  args->collAPI = op->collAPI;
   args->algorithm = op->algorithm;
+  args->nChannels = op->nChannels;
+  args->nPeers = op->nPeers;
   args->specifics = op->specifics;
   args->state = ncclProxyOpReady;
   args->progress = op->connection->tcomm->proxyProgress;
   args->proxyAppendPtr = op->connection->proxyAppendPtr;
+  args->ncclFuncTimes = op->ncclFuncTimes;
+  args->peerRank = op->peerRank;
+  args->groupHash = op->groupHash;
+  args->rank = op->rank;
+exit:
+  if (args->pattern != ncclPatternProfiler) ncclProfilerStartProxyOpEvent(subIndex, args);
   return ncclSuccess;
 }
 
@@ -483,10 +499,12 @@ static ncclResult_t ncclLocalOpAppend(struct ncclComm* comm, struct ncclProxyCon
     op = pool->ops+opIndex;
     proxyOps->freeOp = op->next;
   } else {
-    int freeOp;
-    while ((freeOp = pool->freeOps[tpLocalRank]) == -1) sched_yield();
-    int freeOpNew;
-    while ((freeOpNew = __sync_val_compare_and_swap(pool->freeOps+tpLocalRank, freeOp, -1)) != freeOp) freeOp = freeOpNew;
+    // Read the freeOps value and wait for a value different than -1. Once not -1, read the value with acquire and reset -1
+    int freeOp = -1;
+    while (freeOp == -1) {
+      freeOp = __atomic_exchange_n(&pool->freeOps[tpLocalRank], -1, __ATOMIC_ACQUIRE);
+      if (freeOp == -1) sched_yield();
+    }
     opIndex = freeOp;
     op = pool->ops+opIndex;
     proxyOps->freeOp = op->next;
@@ -553,6 +571,8 @@ static ncclResult_t SaveProxyProfiler(struct ncclComm* comm, struct ncclProxyOp*
 
 static ncclResult_t SaveProxy(struct ncclComm* comm, struct ncclChannel* channel, int type, int peer, struct ncclProxyOp* op, int connIndex, bool* justInquire) {
   if (peer < 0) return ncclSuccess;
+  op->peerRank = peer;
+  op->rank = comm->rank;
 
   struct ncclChannelPeer* peerComm = channel->peers[peer];
   struct ncclConnector* connector = type == proxyRecv ? peerComm->recv+connIndex : peerComm->send+connIndex;
@@ -634,10 +654,10 @@ ncclResult_t ncclProxySaveOp(struct ncclComm* comm, struct ncclProxyOp* op, bool
       const int rank = comm->rank, nranks = comm->nRanks;
       int *nstepsSend = NULL, *nstepsRecv = NULL;
       PatRSAlgorithm<char> algo(op->chunkSize, NCCL_STEPS, 16, 0, size, size, op->chunkSize, rank, nranks);
+      struct ncclPatStep ps = {0};
       NCCLCHECKGOTO(ncclCalloc(&nstepsSend, log2Up(nranks)), result, exit_pat_up);
       NCCLCHECKGOTO(ncclCalloc(&nstepsRecv, log2Up(nranks)), result, exit_pat_up);
 
-      struct ncclPatStep ps;
       do {
         algo.getNextOp(&ps);
         if (ps.flags & PatSkipped) continue;
@@ -668,10 +688,10 @@ ncclResult_t ncclProxySaveOp(struct ncclComm* comm, struct ncclProxyOp* op, bool
       const int rank = comm->rank, nranks = comm->nRanks;
       int *nstepsSend = NULL, *nstepsRecv = NULL;
       PatAGAlgorithm<char> algo(op->chunkSize, NCCL_STEPS, 16, 0, size, size, op->chunkSize, rank, nranks);
+      struct ncclPatStep ps = {0};
       NCCLCHECKGOTO(ncclCalloc(&nstepsSend, log2Up(nranks)), result, exit_pat_down);
       NCCLCHECKGOTO(ncclCalloc(&nstepsRecv, log2Up(nranks)), result, exit_pat_down);
 
-      struct ncclPatStep ps;
       do {
         algo.getNextOp(&ps);
         if (ps.flags & PatSkipped) continue;
@@ -743,6 +763,7 @@ static ncclResult_t removeOp(struct ncclProxyProgressState* state, struct ncclPr
 static ncclResult_t progressOps(struct ncclProxyState* proxyState, struct ncclProxyProgressState* state, struct ncclProxyArgs* opStart, int* idle) {
   struct ncclProxyArgs* prevOp = NULL;
   struct ncclProxyArgs* op = opStart;
+  ncclResult_t status = ncclSuccess;
   while (op) {
     if (op->state == ncclProxyOpNone) return ncclInternalError;
     TIME_START(0); TIME_START(1);
@@ -750,6 +771,8 @@ static ncclResult_t progressOps(struct ncclProxyState* proxyState, struct ncclPr
     if (op->idle) { TIME_STOP(1); TIME_CANCEL(0); } else { TIME_CANCEL(1); TIME_STOP(0); }
     *idle &= op->idle;
     if (op->state == ncclProxyOpNone || ret != ncclSuccess) {
+      //track first error that occured
+      if (ret != ncclSuccess && status == ncclSuccess) status = ret;
       TIME_START(2);
       NCCLCHECK(removeOp(state, &op, &prevOp));
       TIME_STOP(2);
@@ -758,7 +781,7 @@ static ncclResult_t progressOps(struct ncclProxyState* proxyState, struct ncclPr
       op = op->next;
     }
   }
-  return ncclSuccess;
+  return status;
 }
 
 NCCL_PARAM(ProxyAppendBatchSize, "PROXY_APPEND_BATCH_SIZE", 16);
@@ -825,26 +848,17 @@ process_nextops:
 
   for (int i = 0; i < proxyState->tpLocalnRanks; i++) {
     if (freeOp[i] == -1) continue;
-    int newFree = freeOp[i];
-    int oldFree = pool->freeOps[i];
-    // Coverity gets confused by the complex code structure here.  The previous "for" loop ensures that freeOpEnd[i]
-    // is initialized so long as freeOp[i] is initialized (is not -1).  In the current loop we filter out uninitialized
-    // freeOp[i], hence ensuring that freeOpEnd[i] is also initialized.
-    // coverity[uninit_use:FALSE]
-    pool->ops[freeOpEnd[i]].next = oldFree;
-    if (oldFree == -1) {
-      // Nothing for the main thread to consume, we can set it.
-      pool->freeOps[i] = newFree;
-    } else {
-      // The main thread may recycle free ops at any time, replace the freeOps value atomically and check it worked.
-      int swap = __sync_val_compare_and_swap(pool->freeOps+i, oldFree, newFree);
-      if (swap != oldFree) {
-        if (swap != -1) return ncclInternalError;
-        // Ops were recycled while we were trying to swap, just set the value directly now.
-        pool->ops[freeOpEnd[i]].next = -1;
-        pool->freeOps[i] = newFree;
-      }
-    }
+    int oldFree = -1, swap = -1, newFree = freeOp[i];
+    // prepend the ops freeOp[i]-freeOpEnd[i] in front of the pool->freeOps[i] op
+    oldFree = __atomic_load_n(&pool->freeOps[i], __ATOMIC_ACQUIRE);
+    do {
+      // Coverity gets confused by the complex code structure here.  The previous "for" loop ensures that freeOpEnd[i]
+      // is initialized so long as freeOp[i] is initialized (is not -1).  In the current loop we filter out uninitialized
+      // freeOp[i], hence ensuring that freeOpEnd[i] is also initialized.
+      // coverity[uninit_use:FALSE]
+      pool->ops[freeOpEnd[i]].next = swap = oldFree;
+      __atomic_compare_exchange_n(&pool->freeOps[i], &oldFree, newFree, true, /*success=*/__ATOMIC_RELEASE, /*failure=*/__ATOMIC_ACQUIRE);
+    } while (swap != oldFree);
   }
   ncclProfilerRecordProxyCtrlEventState(eHandle, *added, ncclProfilerProxyCtrlAppendEnd);
   ncclProfilerStopProxyCtrlEvent(eHandle);
@@ -898,16 +912,43 @@ exit:
 NCCL_PARAM(ProxyDumpSignal, "PROXY_DUMP_SIGNAL", -1);
 NCCL_PARAM(ProgressAppendOpFreq, "PROGRESS_APPENDOP_FREQ", 8);
 
+static cpu_set_t proxyCpuset;
+static pthread_once_t proxyCpusetOnce = PTHREAD_ONCE_INIT;
+void proxyCpusetOnceFunc() {
+  const char* setEnv = ncclGetEnv("NCCL_PROXY_CPUSET");
+  if (setEnv) {
+    ncclResult_t res = ncclStrListToCpuset(setEnv, &proxyCpuset);
+    if (res != ncclSuccess) {
+      INFO(NCCL_ENV, "failed to decode NCCL_PROXY_CPUSET=%s. Ignoring", setEnv);
+      goto fail;
+    }
+    // debug info
+    char msg[1024] = {0};
+    cpu_set_t currSet;
+    sched_getaffinity(0, sizeof(cpu_set_t), &currSet);
+    (void)ncclCpusetToStrList(&currSet, msg, sizeof(msg));
+    snprintf(msg + strlen(msg), sizeof(msg) - strlen(msg), " changed to ");
+    (void)ncclCpusetToStrList(&proxyCpuset, msg + strlen(msg), sizeof(msg) - strlen(msg));
+    INFO(NCCL_ENV, "NCCL_PROXY_CPUSET = %s: %s", setEnv, msg);
+    return;
+  }
+  // if we arrive here we have either no env or we have failed to decode it
+fail:
+  CPU_ZERO(&proxyCpuset);
+  return;
+}
+
 void* ncclProxyProgress(void *proxyState_) {
   struct ncclProxyState* proxyState = (struct ncclProxyState*)proxyState_;
+
+  // This thread is created by proxyService, therefore setting the affinity is not needed.
+  INFO(NCCL_INIT, "[Proxy Progress] Device %d CPU core %d", proxyState->cudaDev, sched_getcpu());
+
   if (setProxyThreadContext(proxyState)) {
     INFO(NCCL_INIT, "[Proxy Progress] Set CUDA context on device %d", proxyState->cudaDev);
   } else if (cudaSetDevice(proxyState->cudaDev) != cudaSuccess) {
     WARN("[Proxy Progress] Failed to set CUDA device %d", proxyState->cudaDev);
   }
-  // if (CPU_COUNT(&comm->cpuAffinity)) sched_setaffinity(0, sizeof(cpu_set_t), &comm->cpuAffinity);
-
-  INFO(NCCL_INIT, "[Proxy Progress] Device %d CPU core %d", proxyState->cudaDev, sched_getcpu());
 
   struct ncclProxyProgressState* state = &proxyState->progressState;
   state->nextOps = -1;
@@ -933,11 +974,13 @@ void* ncclProxyProgress(void *proxyState_) {
       INFO(NCCL_ALL,"%s:%d -> %d [Progress Thread]", __FILE__, __LINE__, ret);
       break;
     }
-    void* eHandle;
-    ncclProfilerStartProxyCtrlEvent(proxyState->profilerContext, &eHandle);
-    if (lastIdle == 0 && idle == 1) ncclProfilerRecordProxyCtrlEventState(eHandle, 0, ncclProfilerProxyCtrlIdle);
-    if (lastIdle == 1 && idle == 0) ncclProfilerRecordProxyCtrlEventState(eHandle, 0, ncclProfilerProxyCtrlActive);
-    ncclProfilerStopProxyCtrlEvent(eHandle);
+    if ((lastIdle == 0 && idle == 1) || (lastIdle == 1 && idle == 0)) {
+      void* eHandle;
+      ncclProfilerStartProxyCtrlEvent(proxyState->profilerContext, &eHandle);
+      if (lastIdle == 0 && idle == 1) ncclProfilerRecordProxyCtrlEventState(eHandle, 0, ncclProfilerProxyCtrlIdle);
+      if (lastIdle == 1 && idle == 0) ncclProfilerRecordProxyCtrlEventState(eHandle, 0, ncclProfilerProxyCtrlActive);
+      ncclProfilerStopProxyCtrlEvent(eHandle);
+    }
     if (idle || !state->active || (++proxyOpAppendCounter == ncclParamProgressAppendOpFreq())) {
       int added = 0;
       proxyOpAppendCounter = 0;
@@ -1564,15 +1607,17 @@ enum {
 
 void* ncclProxyService(void* _args) {
   struct ncclProxyState* proxyState =  (struct ncclProxyState*) _args;
-  // if (CPU_COUNT(&comm->cpuAffinity)) sched_setaffinity(0, sizeof(cpu_set_t), &comm->cpuAffinity);
+
+  // set the thread affinity before setting the cuda context
+  pthread_once(&proxyCpusetOnce,proxyCpusetOnceFunc);
+  if (CPU_COUNT(&proxyCpuset)) sched_setaffinity(0, sizeof(cpu_set_t), &proxyCpuset);
+  INFO(NCCL_INIT, "[Proxy Service] Device %d CPU core %d", proxyState->cudaDev, sched_getcpu());
+
   if (setProxyThreadContext(proxyState)) {
     INFO(NCCL_INIT, "[Proxy Service] Created CUDA context on device %d", proxyState->cudaDev);
   } else if (cudaSetDevice(proxyState->cudaDev) != cudaSuccess) {
     WARN("[Proxy Service] Failed to set CUDA device %d", proxyState->cudaDev);
   }
-  // if (CPU_COUNT(&comm->cpuAffinity)) sched_setaffinity(0, sizeof(cpu_set_t), &comm->cpuAffinity);
-
-  INFO(NCCL_INIT, "[Proxy Service] Device %d CPU core %d", proxyState->cudaDev, sched_getcpu());
 
   // Prepare poll descriptor
   struct ncclProxyConnectionPool connectionPool;
@@ -1757,13 +1802,16 @@ void* ncclProxyServiceUDS(void* _args) {
   struct ncclProxyState* proxyState =  (struct ncclProxyState*) _args;
   struct pollfd pollfds[1];
 
+  // set the thread affinity before setting the cuda context
+  pthread_once(&proxyCpusetOnce,proxyCpusetOnceFunc);
+  if (CPU_COUNT(&proxyCpuset)) sched_setaffinity(0, sizeof(cpu_set_t), &proxyCpuset);
+  INFO(NCCL_INIT, "[Proxy Service UDS] Device %d CPU core %d", proxyState->cudaDev, sched_getcpu());
+
   if (setProxyThreadContext(proxyState)) {
     INFO(NCCL_INIT, "[Proxy Service UDS] Set CUDA context on device %d", proxyState->cudaDev);
   } else if (cudaSetDevice(proxyState->cudaDev) != cudaSuccess) {
     WARN("[Proxy Service UDS] Failed to set CUDA device %d", proxyState->cudaDev);
   }
-
-  INFO(NCCL_INIT, "[Proxy Service UDS] Device %d CPU core %d", proxyState->cudaDev, sched_getcpu());
 
   if (ncclIpcSocketGetFd(&proxyState->ipcSock, &pollfds[0].fd) != ncclSuccess) {
     WARN("[Proxy Service UDS] Get listenSock fd fails");
@@ -1804,6 +1852,7 @@ ncclResult_t ncclProxyInit(struct ncclComm* comm, struct ncclSocket* sock, union
   comm->proxyState->listenSock = sock;
   comm->proxyState->peerAddresses = peerAddresses;
   comm->proxyState->peerAddressesUDS = peerAddressesUDS;
+  comm->proxyState->netAttr = NCCL_NET_ATTR_INIT;
 
   // UDS support
   NCCLCHECK(ncclIpcSocketInit(&comm->proxyState->ipcSock, comm->rank, peerAddressesUDS[comm->rank], comm->abortFlag));
@@ -1828,9 +1877,16 @@ ncclResult_t ncclProxyCreate(struct ncclComm* comm) {
     proxyState->dmaBufSupport = comm->dmaBufSupport;
     proxyState->ncclNet = comm->ncclNet;
     proxyState->ncclCollNet = comm->ncclCollNet;
+    proxyState->ginState = &comm->sharedRes->ginState;
+    proxyState->netContext = comm->netContext;
+    proxyState->collNetContext = comm->collNetContext;
     proxyState->profilerContext = comm->profilerContext;
     proxyState->directMode = comm->directMode;
     memcpy(proxyState->buffSizes, comm->buffSizes, sizeof(comm->buffSizes));
+
+    if(TIMER_LOG_ENTRY){
+      global_timer_log.init();
+    }
 
     PTHREADCHECK(pthread_create(&comm->proxyState->thread, NULL, ncclProxyService, comm->proxyState), "pthread_create");
     ncclSetThreadName(comm->proxyState->thread, "NCCL Service %2d", comm->cudaDev);
@@ -1888,6 +1944,9 @@ ncclResult_t ncclProxyStop(struct ncclComm* comm) {
 }
 
 ncclResult_t ncclProxyDestroy(struct ncclComm* comm) {
+  if(TIMER_LOG_ENTRY){
+    global_timer_log.destroy();
+  }
   struct ncclProxyState* sharedProxyState = comm->sharedRes->proxyState;
 
   if (sharedProxyState) {
