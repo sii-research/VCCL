@@ -177,7 +177,8 @@ static ncclResult_t ncclNet_init(void** ctx __attribute__((unused)),
 }
 
 ncclNet_t* getNcclNet_v6(void* lib) {
-  ncclNet_v6 = (ncclNet_v6_t*)dlsym(lib, "ncclNetPlugin_v6");
+  // ncclNet_v6 = (ncclNet_v6_t*)dlsym(lib, "ncclNetPlugin_v6");
+  ncclNet_v6 = NULL;
   if (ncclNet_v6) {
     ncclNet.name = ncclNet_v6->name;
     ncclNet.init = ncclNet_init;

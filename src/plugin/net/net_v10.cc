@@ -103,7 +103,8 @@ static ncclResult_t ncclNet_init(void** ctx, uint64_t commId __attribute__((unus
 }
 
 ncclNet_t* getNcclNet_v10(void* lib) {
-  ncclNet_v10 = (ncclNet_v10_t*)dlsym(lib, "ncclNetPlugin_v10");
+  // ncclNet_v10 = (ncclNet_v10_t*)dlsym(lib, "ncclNetPlugin_v10");
+  ncclNet_v10 = NULL;
   if (ncclNet_v10) {
     ncclNet.name = ncclNet_v10->name;
     ncclNet.init = ncclNet_init;

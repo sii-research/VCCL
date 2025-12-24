@@ -194,7 +194,8 @@ static ncclResult_t ncclNet_init(void** ctx __attribute__((unused)),
 }
 
 ncclNet_t* getNcclNet_v8(void* lib) {
-  ncclNet_v8 = (ncclNet_v8_t*)dlsym(lib, "ncclNetPlugin_v8");
+  // ncclNet_v8 = (ncclNet_v8_t*)dlsym(lib, "ncclNetPlugin_v8");
+  ncclNet_v8 = NULL;
   if (ncclNet_v8) {
     ncclNet.name = ncclNet_v8->name;
     ncclNet.init = ncclNet_init;
