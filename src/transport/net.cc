@@ -1375,20 +1375,12 @@ static ncclResult_t ncclIbRollBackSendProxyProgress(struct ncclProxyState *proxy
         }
       }
       // Make sure size is reset to -1 before we update the head.
-      if (t_sub->reg == 0)
-        connFifo[t_buffSlot].size = -1;
+      connFifo[t_buffSlot].size = -1;
       __sync_synchronize();
 
       if (resources->shared == 0) {
         volatile uint64_t *sendHead = resources->gdcSync ? resources->gdcSync : &resources->sendMem->head;
-        if (t_sub->reg) {
-          // We may have added more net steps, but reg operations only have a single step w.r.t. the GPU.
-          if (t_b == t_sub->nsteps)
-            *sendHead = t_sub->base + args->sliceSteps;
-        }
-        else {
-          *sendHead = t_sub->base + t_b;
-        }
+        *sendHead = t_sub->base + t_b;
         if (resources->gdcSync)
           wc_store_fence(); // Flush out WC write
       }
