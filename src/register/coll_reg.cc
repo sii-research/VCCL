@@ -1,6 +1,13 @@
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION. All rights reserved.
+ *
+ * See LICENSE.txt for license information
+ ************************************************************************/
+
 #include "register.h"
 #include "transport.h"
 #include "enqueue.h"
+#include "register_inline.h"
 
 static ncclResult_t registerCheckP2PConnection(struct ncclComm* comm, struct ncclConnector* conn, struct ncclTopoGraph* graph, int peer, bool* needReg) {
   if (conn->connected) {
@@ -61,32 +68,34 @@ ncclResult_t ncclRegisterCollNvlsBuffers(
 
     if (nvlsReged && comm->nNodes > 1 && info->algorithm == NCCL_ALGO_NVLS) {
       if (comm->planner.persistent && ncclParamGraphRegister()) {
-        ncclCollnetGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetSend, &collnetReged, &sendHandle, cleanupQueue, &info->nCleanupQueueElts);
-        if (collnetReged) ncclCollnetGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &collnetReged, &recvHandle, cleanupQueue, &info->nCleanupQueueElts);
+        if (info->func == ncclFuncAllGather) {
+          ncclCollnetGraphRegisterBuffer(comm, info->sendbuff, sendbuffSize, collNetSend, &collnetReged, &sendHandle, cleanupQueue, &info->nCleanupQueueElts);
+        } else if (info->func == ncclFuncReduceScatter) {
+          ncclCollnetGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &collnetReged, &recvHandle, cleanupQueue, &info->nCleanupQueueElts);
+        } else if (info->func == ncclFuncAllReduce) {
+          ncclCollnetGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &collnetReged, &recvHandle, cleanupQueue, &info->nCleanupQueueElts);
+          if (collnetReged) ncclCollnetGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetSend, &collnetReged, &sendHandle, cleanupQueue, &info->nCleanupQueueElts);
+        }
       }
 
       if (collnetReged == 0 && ncclParamLocalRegister()) {
-        ncclCollnetLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetSend, &collnetReged, &sendHandle);
-        if (collnetReged) ncclCollnetLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &collnetReged, &recvHandle);
+        if (info->func == ncclFuncAllGather) {
+          ncclCollnetLocalRegisterBuffer(comm, info->sendbuff, sendbuffSize, collNetSend, &collnetReged, &sendHandle);
+        } else if (info->func == ncclFuncReduceScatter) {
+          ncclCollnetLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &collnetReged, &recvHandle);
+        } else if (info->func == ncclFuncAllReduce) {
+          ncclCollnetLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &collnetReged, &recvHandle);
+          if (collnetReged) ncclCollnetLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetSend, &collnetReged, &sendHandle);
+        }
       }
     }
 
     if (nvlsReged) {
       *regNeedConnect = 0;
       /* tweak NVLS channels usage; for registered NVLS buffer to saturate bandwidth. */
-      if (comm->nNodes == 1) {
-        if (info->func == ncclFuncReduceScatter) {
-          // RS: Further tweaks for Blackwell with NVLS registered buffers
-          info->nMaxChannels = std::max(comm->config.minCTAs, std::min(comm->config.maxCTAs, (comm->compCap >= 100) ? 6 : 5));
-        }
-        else {
-          // AR/AG: Further tweaks for Blackwell with NVLS registered buffers
-          info->nMaxChannels = std::max(comm->config.minCTAs, std::min(comm->config.maxCTAs, (comm->compCap >= 100) ? 8 : 4));
-        }
-      } else {
-        // Further tweaks for Blackwell with NVLS registered buffers
-        info->nMaxChannels = std::max(comm->config.minCTAs, std::min(comm->config.maxCTAs, (comm->compCap >= 100) ? 7 : 6));
-      }
+      int recChannels;
+      NCCLCHECK(ncclNvlsRegResourcesQuery(comm, info, &recChannels));
+      info->nMaxChannels = recChannels;
       info->regBufType |= NCCL_NVLS_REG_BUFFER;
     }
 
@@ -173,7 +182,8 @@ ncclResult_t ncclRegisterCollBuffers(
     // IPC buffer registration
     if (info->func == ncclFuncReduceScatter && info->algorithm != NCCL_ALGO_COLLNET_DIRECT) goto exit;
     if (info->algorithm == NCCL_ALGO_RING && ((info->func == ncclFuncAllReduce && info->sendbuff == info->recvbuff) || info->func == ncclFuncReduce)) goto exit;
-    if ((info->algorithm == NCCL_ALGO_TREE || info->algorithm == NCCL_ALGO_COLLNET_CHAIN) && info->sendbuff == info->recvbuff) goto exit;
+    if (info->algorithm == NCCL_ALGO_TREE && info->sendbuff == info->recvbuff) goto exit;
+    if (info->algorithm == NCCL_ALGO_COLLNET_CHAIN && info->sendbuff == info->recvbuff && comm->maxLocalRanks > 1) goto exit;
     if (info->func == ncclFuncAllGather && info->algorithm == NCCL_ALGO_PAT) goto exit;
 
     int peerRanks[NCCL_MAX_LOCAL_RANKS];
@@ -186,9 +196,9 @@ ncclResult_t ncclRegisterCollBuffers(
 
     if (info->algorithm == NCCL_ALGO_COLLNET_DIRECT) {
       struct ncclChannel* channel = comm->channels;
-      int ipcRegFlag = 0, netSendRegFlag = 0, netRecvRegFlag = 0;
-      void *sendHandle, *recvHandle;
-      if (info->func != ncclFuncReduceScatter && comm->intraNodeP2pSupport) {
+      int ipcSendRegFlag = 0, ipcRecvRegFlag = 0, netSendRegFlag = 0, netRecvRegFlag = 0;
+      void *sendHandle = NULL, *recvHandle = NULL;
+      if (info->func != ncclFuncReduceScatter && info->func != ncclFuncAllReduce && comm->isAllDirectP2p) {
         for (int r = 0; r < NCCL_MAX_DIRECT_ARITY; ++r) {
           for (int down = 0; down < 2; ++down) {
             int peer = down ? channel->collnetDirect.down[r] : channel->collnetDirect.up[r];
@@ -213,16 +223,19 @@ ncclResult_t ncclRegisterCollBuffers(
 
         if (nPeers > 0) {
           if (comm->planner.persistent && ncclParamGraphRegister()) {
-            ncclIpcGraphRegisterBuffer(comm, info->sendbuff, sendbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcRegFlag, &info->sendbuffOffset, &info->sendbuffRmtAddrs, cleanupQueue, &info->nCleanupQueueElts);
-            if (ipcRegFlag) ncclIpcGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcRegFlag, &info->recvbuffOffset, &info->recvbuffRmtAddrs, cleanupQueue, &info->nCleanupQueueElts);
+            ncclIpcGraphRegisterBuffer(comm, info->sendbuff, sendbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcSendRegFlag, &info->sendbuffOffset, &info->sendbuffRmtAddrs, cleanupQueue, &info->nCleanupQueueElts);
+            ncclIpcGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcRecvRegFlag, &info->recvbuffOffset, &info->recvbuffRmtAddrs, cleanupQueue, &info->nCleanupQueueElts);
           }
-          if (!ipcRegFlag && ncclParamLocalRegister()) {
-            ncclIpcLocalRegisterBuffer(comm, info->sendbuff, sendbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcRegFlag, &info->sendbuffOffset, &info->sendbuffRmtAddrs);
-            if (ipcRegFlag) ncclIpcLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcRegFlag, &info->recvbuffOffset, &info->recvbuffRmtAddrs);
+          if (ncclParamLocalRegister()) {
+            if (!ipcSendRegFlag) ncclIpcLocalRegisterBuffer(comm, info->sendbuff, sendbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcSendRegFlag, &info->sendbuffOffset, &info->sendbuffRmtAddrs);
+            if (!ipcRecvRegFlag) ncclIpcLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &ipcRecvRegFlag, &info->recvbuffOffset, &info->recvbuffRmtAddrs);
           }
         }
-        if (ipcRegFlag) {
-          info->regBufType |= NCCL_IPC_REG_BUFFER;
+
+        if (info->func == ncclFuncAllGather) {
+          if (ipcRecvRegFlag) {
+            info->regBufType |= NCCL_IPC_REG_BUFFER;
+          }
         }
       }
 
@@ -230,29 +243,36 @@ ncclResult_t ncclRegisterCollBuffers(
       if (info->opDev.op != ncclDevPreMulSum && info->opDev.op != ncclDevSumPostDiv && !(info->func == ncclFuncAllReduce && !comm->isOneRPN)) {
         if (comm->planner.persistent && ncclParamGraphRegister()) {
           ncclCollnetGraphRegisterBuffer(comm, info->sendbuff, sendbuffSize, collNetSend, &netSendRegFlag, &sendHandle, cleanupQueue, &info->nCleanupQueueElts);
+          ncclCollnetGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &netRecvRegFlag, &recvHandle, cleanupQueue, &info->nCleanupQueueElts);
           info->sendMhandle = sendHandle;
-          if (netSendRegFlag) {
-            ncclCollnetGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &netRecvRegFlag, &recvHandle, cleanupQueue, &info->nCleanupQueueElts);
-            info->recvMhandle = recvHandle;
-          }
+          info->recvMhandle = recvHandle;
         }
 
-        if ((netSendRegFlag == 0 || netRecvRegFlag == 0) && ncclParamLocalRegister()) {
+        if (ncclParamLocalRegister()) {
           if (!netSendRegFlag) {
             ncclCollnetLocalRegisterBuffer(comm, info->sendbuff, sendbuffSize, collNetSend, &netSendRegFlag, &sendHandle);
             info->sendMhandle = sendHandle;
           }
-          if (netSendRegFlag && !netRecvRegFlag) {
+          if (!netRecvRegFlag) {
             ncclCollnetLocalRegisterBuffer(comm, info->recvbuff, recvbuffSize, collNetRecv, &netRecvRegFlag, &recvHandle);
             info->recvMhandle = recvHandle;
           }
         }
-      }
 
-      if (netSendRegFlag && netRecvRegFlag) {
-        if (comm->isOneRPN) info->nMaxChannels = 1;
-        info->regBufType |= NCCL_NET_REG_BUFFER;
+        if (info->func == ncclFuncAllReduce || info->func == ncclFuncReduceScatter) {
+          if (comm->isOneRPN && netSendRegFlag && netRecvRegFlag) {
+            info->regBufType |= NCCL_NET_REG_BUFFER;
+          }
+        } else if (info->func == ncclFuncAllGather) {
+          if (comm->isOneRPN) {
+            info->regBufType = (netSendRegFlag && netRecvRegFlag) ? (info->regBufType | NCCL_NET_REG_BUFFER) : info->regBufType;
+          } else {
+            info->regBufType = (netSendRegFlag) ? (info->regBufType | NCCL_NET_REG_BUFFER) : info->regBufType;
+          }
+        }
       }
+      // tweak nChannels for 1RPN net registration
+      if (comm->isOneRPN && (info->regBufType & NCCL_NET_REG_BUFFER)) info->nMaxChannels = 1;
     } else if (info->algorithm == NCCL_ALGO_RING) {
       struct ncclReg* recvRegRecord = NULL;
       struct ncclReg* sendRegRecord = NULL;
@@ -269,7 +289,7 @@ ncclResult_t ncclRegisterCollBuffers(
       NCCLCHECK(ncclRegFind(comm, info->recvbuff, recvbuffSize, &recvRegRecord));
       if (recvRegRecord == NULL && !(comm->planner.persistent && ncclParamGraphRegister())) goto exit;
       NCCLCHECK(ncclRegFind(comm, info->sendbuff, sendbuffSize, &sendRegRecord));
-      if (sendRegRecord == NULL && !(comm->planner.persistent && ncclParamGraphRegister())) goto exit;
+      if (comm->nNodes > 1 && sendRegRecord == NULL && !(comm->planner.persistent && ncclParamGraphRegister())) goto exit;
       NCCLCHECK(ncclCalloc(&sendNetConns, comm->nChannels));
       NCCLCHECK(ncclCalloc(&sendNetHandles, comm->nChannels));
       NCCLCHECK(ncclCalloc(&recvNetConns, comm->nChannels));
@@ -308,7 +328,7 @@ ncclResult_t ncclRegisterCollBuffers(
           }
         }
       }
-      if (nPeers > 0 && comm->intraNodeP2pSupport) {
+      if (nPeers > 0 && comm->isAllDirectP2p) {
         if (comm->planner.persistent && ncclParamGraphRegister()) {
           ncclIpcGraphRegisterBuffer(comm, info->recvbuff, recvbuffSize, peerRanks, nPeers, NCCL_IPC_COLLECTIVE, &regBufFlag, &info->recvbuffOffset, &info->recvbuffRmtAddrs, cleanupQueue, &info->nCleanupQueueElts);
         }
@@ -365,7 +385,7 @@ ncclResult_t ncclRegisterCollBuffers(
       void *sendHandle, *recvHandle;
       NCCLCHECK(ncclRegFind(comm, info->recvbuff, recvbuffSize, &recvRegRecord));
       if (recvRegRecord == NULL && !(comm->planner.persistent && ncclParamGraphRegister())) goto exit;
-      if (comm->intraNodeP2pSupport) {
+      if (comm->isAllDirectP2p) {
         for (int c = 0; c < comm->nChannels; ++c) {
           struct ncclChannel* channel = comm->channels + c;
           struct ncclTree* tree = NULL;

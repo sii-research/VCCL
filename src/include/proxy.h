@@ -12,10 +12,13 @@
 #include "socket.h"
 #include "ipcsocket.h"
 #include "nccl_net.h"
-#include <pthread.h>
 #include "shmutils.h"
 #include "p2p.h"
 #include "collectives.h"
+#include "gin/gin_host.h"
+
+#include <mutex>
+#include <condition_variable>
 
 typedef enum : uint8_t {
   ncclPatternRing,
@@ -49,6 +52,11 @@ union ncclProxyOpSpecifics {
     size_t sizePerRank;
     int nNodes, node;
   } collnetDirect;
+  struct {
+    int sendSlices;
+    int recvSlices;
+    int stepSize;
+  } bcast;
 };
 
 struct ncclProxyOp {
@@ -69,6 +77,7 @@ struct ncclProxyOp {
   uint8_t /*ncclDataType_t*/ dtype;
   uint8_t /*ncclDevRedOp_t*/ redOp;
   uint8_t /*ncclFunc_t*/ coll;
+  uint8_t /*ncclFunc_t*/ collAPI;
   uint8_t /*ncclPattern_t*/ pattern;
   uint8_t protocol;
   uint8_t algorithm;
@@ -81,6 +90,8 @@ struct ncclProxyOp {
   int isOneRPN;
   RingAlgorithm *ringAlgo;
   union ncclProxyOpSpecifics specifics;
+  int nChannels;
+  int nPeers;
 
   // Profiler plugin
   union {
@@ -103,6 +114,13 @@ struct ncclProxyOp {
   uint64_t workCounter;
 
   struct ncclProxyOp *enqNext;
+};
+
+struct ncclProxySubArgs;
+
+struct ncclProxyEventHandle {
+  void* stepEventHandle;
+  struct ncclProxySubArgs* subArgPtr;
 };
 
 struct ncclProxySubArgs {
@@ -137,13 +155,12 @@ struct ncclProxySubArgs {
   // Profiler plugin
   int eActivationMask;
   int rank;
-  uint64_t profilerSteps;
   pid_t pid;
   void* profilerContext;
   void* taskEventHandle;
   void* opEventHandle;
   void* kernelEventHandle;
-  void* stepEventHandles[NCCL_STEPS];
+  struct ncclProxyEventHandle pHandles[NCCL_STEPS];
   size_t transSize;
   uint64_t workCounter;
 
@@ -169,11 +186,14 @@ struct ncclProxyArgs {
   uint8_t /*ncclDevRedOp_t*/ redOp;
   uint8_t /*ncclPattern_t*/ pattern;
   uint8_t /*ncclFunc_t*/ coll;
+  uint8_t /*ncclFunc_t*/ collAPI;
   uint8_t protocol;
   uint8_t algorithm;
   int state;
   char* sharedBuff[NCCL_STEPS];
   int sharedSize[NCCL_STEPS];
+  int nChannels;
+  int nPeers;
 
   int idle;
 
@@ -197,8 +217,8 @@ struct ncclProxyOpsPool {
   volatile int nextOps;
   volatile int nextOpsEnd;
   volatile int freeOps[NCCL_MAX_LOCAL_RANKS];
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
+  std::mutex mutex;
+  std::condition_variable cond;
 };
 
 struct ncclProxyOps {
@@ -226,6 +246,8 @@ struct ncclProxyPeer {
 };
 
 struct ncclSharedNetComms {
+  int activeConnect[MAXCHANNELS];
+  int activeAccept[MAXCHANNELS];
   void* sendComm[MAXCHANNELS];
   void* recvComm[MAXCHANNELS];
   int sendRefCount[MAXCHANNELS];
@@ -239,7 +261,7 @@ struct ncclProxyProgressState {
   ncclShmHandle_t handle;
   char opsPoolShmSuffix[6];
 
-  pthread_t thread;
+  std::thread thread;
   volatile int stop;
   struct ncclProxyPeer** localPeers;
   struct ncclSharedNetComms* netComms[NCCL_MAX_NETDEVS];
@@ -308,11 +330,13 @@ struct ncclProxyState {
   bool dmaBufSupport;
   ncclNet_t* ncclNet;
   ncclCollNet_t* ncclCollNet;
+  struct ncclGinState* ginState;
+
   uint32_t* abortFlag;
   bool directMode;
   // Service threads
-  pthread_t thread;
-  pthread_t threadUDS;
+  std::thread thread;
+  std::thread threadUDS;
   struct ncclSocket* listenSock;
   struct ncclIpcSocket ipcSock;
   int stop;
@@ -329,6 +353,11 @@ struct ncclProxyState {
 
   // Progress thread
   struct ncclProxyProgressState progressState;
+
+  // Network plugin
+  void* netContext;
+  ncclNetAttr_t netAttr;
+  void* collNetContext;
 
   // Profiler plugin
   void* profilerContext;
@@ -403,6 +432,7 @@ ncclResult_t ncclPollProxyResponse(struct ncclComm* comm, struct ncclProxyConnec
 // UDS support
 ncclResult_t ncclProxyClientGetFdBlocking(struct ncclComm* comm, int rank, void *handle, int* convertedFd);
 ncclResult_t ncclProxyClientQueryFdBlocking(struct ncclComm* comm, struct ncclProxyConnector* proxyConn, int localFd, int* rmtFd);
+ncclResult_t ncclProxyClientBatchQueryFdBlocking(struct ncclComm* comm, struct ncclProxyConnector* proxyConn, int* localFds, int* rmtFds, int numSegments);
 
 ncclResult_t ncclProxyStop(struct ncclComm* comm);
 ncclResult_t ncclProxyShmUnlink(struct ncclComm* comm);

@@ -1,6 +1,14 @@
+/*************************************************************************
+ * Copyright (c) 2015-2025, NVIDIA CORPORATION. All rights reserved.
+ *
+ * See LICENSE.txt for license information
+ ************************************************************************/
+
 #include "comm.h"
 #include "transport.h"
 #include "bootstrap.h"
+
+NCCL_PARAM(MultiSegmentRegister, "MULTI_SEGMENT_REGISTER", 1);
 
 ncclResult_t ncclTransportRingConnect(struct ncclComm* comm) {
   struct ringConnInfo {

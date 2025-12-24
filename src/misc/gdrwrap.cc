@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "gdrwrap.h"
+#include <mutex>
 
 #ifndef GDR_DIRECT
 #include "core.h"
@@ -24,7 +25,10 @@ static int (*gdr_internal_copy_from_mapping)(gdr_mh_t handle, void *h_ptr, const
 
 
 // Used to make the GDR library calls thread safe
-pthread_mutex_t gdrLock = PTHREAD_MUTEX_INITIALIZER;
+std::mutex& getGdrMutex() {
+  static std::mutex gdrMutex;
+  return gdrMutex;
+}
 
 #define GDRAPI_LIBNAME "libgdrapi.so"
 
@@ -47,7 +51,7 @@ pthread_mutex_t gdrLock = PTHREAD_MUTEX_INITIALIZER;
     *cast = tmp;                                         \
   } while (0)
 
-static pthread_once_t initOnceControl = PTHREAD_ONCE_INIT;
+static std::once_flag initOnceFlag;
 static ncclResult_t initResult;
 
 static void initOnceFunc(void) {
@@ -97,7 +101,7 @@ teardown:
 
 
 ncclResult_t wrap_gdr_symbols(void) {
-  pthread_once(&initOnceControl, initOnceFunc);
+  std::call_once(initOnceFlag, initOnceFunc);
   return initResult;
 }
 

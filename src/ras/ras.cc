@@ -4,10 +4,6 @@
  * See LICENSE.txt for license information
  ************************************************************************/
 
-// Workaround for libstdc++ trying to force public visibility of std:: symbols.  We don't want to do that in libnccl.so.
-#include <bits/c++config.h>
-#undef _GLIBCXX_VISIBILITY
-#define _GLIBCXX_VISIBILITY(V)
 #include <cstddef>
 #include <mutex>
 #include <poll.h>
@@ -19,6 +15,7 @@
 #include "nccl.h"
 #include "utils.h"
 #include "ras_internal.h"
+#include "os.h"
 
 // Type of a notification from a local NCCL thread.
 typedef enum {
@@ -46,7 +43,7 @@ static int rasInitRefCount = 0;
 // The RAS network listening socket of this RAS thread (random port).
 struct ncclSocket rasNetListeningSocket;
 
-static pthread_t rasThread;
+static std::thread rasThread;
 
 // Used for communication from regular NCCL threads to the RAS thread.
 static std::mutex rasNotificationMutex;
@@ -76,7 +73,7 @@ static ncclResult_t rasNetSendNack(struct rasSocket* sock);
 
 static void* rasThreadMain(void*);
 
-static void rasTerminate() __attribute__((destructor));
+static void rasTerminate();
 
 NCCL_PARAM(RasTimeoutFactor, "RAS_TIMEOUT_FACTOR", 1);
 
@@ -107,10 +104,12 @@ ncclResult_t ncclRasCommInit(struct ncclComm* comm, struct rasRankInit* myRank) 
 
       SYSCHECKGOTO(pipe(rasNotificationPipe), "pipe", ret, fail);
 
-      PTHREADCHECKGOTO(pthread_create(&rasThread, nullptr, &rasThreadMain, nullptr), "pthread_create", ret, fail);
+      rasThread = std::thread(rasThreadMain, nullptr);
       ncclSetThreadName(rasThread, "NCCL RAS");
 
       rasInitialized = true;
+
+      atexit(rasTerminate);
     }
   }
   ncclAtomicRefCountIncrement(&rasInitRefCount);
@@ -173,7 +172,7 @@ static void rasTerminate() {
   memset(&msg, '\0', sizeof(msg));
   msg.type = RAS_TERMINATE;
   if (rasLocalNotify(&msg) == ncclSuccess)
-    (void)pthread_join(rasThread, nullptr);
+    rasThread.join();
 }
 
 // Invoked by regular NCCL threads on every (non-split) comm initialization.  Provides info on all the ranks within
@@ -480,6 +479,16 @@ static ncclResult_t rasMsgHandleConnInit(const struct rasMsg* msg, struct rasSoc
   sock->status = RAS_SOCK_READY;
   // rasConnResume will reset any experiencingDelays, startRetryTime, etc.
 
+  {
+    struct rasEventNotification event = {
+      .eventType = "PEER_CONNECTING",
+      .details = "",
+      .peerInfo = nullptr,
+      .peerAddr = &msg->connInit.listeningAddr
+    };
+    rasClientsNotifyEvent(RAS_EVENT_TRACE, &event);
+  }
+
   conn->sock = sock;
   sock->conn = conn;
   memcpy(&sock->sock.addr, &msg->connInit.listeningAddr, sizeof(sock->sock.addr));
@@ -644,7 +653,7 @@ static void* rasThreadMain(void*) {
           struct rasSocket* sock;
           for (sock = rasSocketsHead; sock;) {
             struct rasSocket* sockNext = sock->next;
-            if (rasPfds[pollIdx].fd == sock->sock.fd) {
+            if (rasPfds[pollIdx].fd == sock->sock.socketDescriptor) {
               rasSockEventLoop(sock, pollIdx);
               break;
             }
@@ -687,17 +696,17 @@ exit:
 ncclResult_t rasGetNewPollEntry(int* index) {
   int i;
   for (i = 0; i < nRasPfds; i++)
-    if (rasPfds[i].fd == -1)
+    if (rasPfds[i].fd == NCCL_INVALID_SOCKET)
       break;
   if (i == nRasPfds) {
     NCCLCHECK(ncclRealloc(&rasPfds, nRasPfds, nRasPfds+RAS_INCREMENT));
     nRasPfds += RAS_INCREMENT;
     for (int j = i; j < nRasPfds; j++)
-      rasPfds[j].fd = -1;
+      rasPfds[j].fd = NCCL_INVALID_SOCKET;
   }
 
   memset(rasPfds+i, '\0', sizeof(*rasPfds));
-  rasPfds[i].fd = -1;
+  rasPfds[i].fd = NCCL_INVALID_SOCKET;
 
   *index = i;
   return ncclSuccess;

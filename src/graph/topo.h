@@ -9,6 +9,9 @@
 
 #include "graph.h"
 #include "core.h"
+#include "xml.h"
+#include "net.h"
+#include "os.h"
 
 #define LOC_BW 5000.0
 #define SM60_NVLINK_BW 18.0
@@ -16,7 +19,7 @@
 #define SM80_NVLINK_BW 20.0
 #define SM90_NVLINK_BW 20.6
 #define SM86_NVLINK_BW 12.0
-#define SM100_NVLINK_BW 40.0
+#define SM100_NVLINK_BW 40.1
 #define PCI_BW 12.0           // PCI Gen3 x16
 #define AMD_BW 16.0
 #define BDW_QPI_BW 6.0
@@ -50,9 +53,10 @@ extern const char* topoNodeTypeStr[];
 #define LINK_PCI 4
 // Skipping 5 for PATH_PXB
 // Skipping 6 for PATH_PXN
-// Skipping 7 for PATH_PHB
-#define LINK_SYS 8
-#define LINK_NET 9
+// Skipping 7 for PATH_P2C
+// Skipping 8 for PATH_PHB
+#define LINK_SYS 9
+#define LINK_NET 10
 extern const char* topoLinkTypeStr[];
 
 // Local (myself)
@@ -73,24 +77,29 @@ extern const char* topoLinkTypeStr[];
 // Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)
 #define PATH_PXB 5
 
+// Connection between a GPU and a NIC using the C2C connection to the CPU and the PCIe connection to the NIC
+#define PATH_P2C 6
+
 // Connection between a GPU and a NIC using an intermediate GPU. Used to enable rail-local, aggregated network send/recv operations.
-#define PATH_PXN 6
+#define PATH_PXN 7
 
 // Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)
-#define PATH_PHB 7
+#define PATH_PHB 8
 
 // Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)
-#define PATH_SYS 8
+#define PATH_SYS 9
 
 // Connection through the network
-#define PATH_NET 9
+#define PATH_NET 10
 
 // New type of path which should precede PATH_PIX
 #define PATH_PORT PATH_NVL
 
 // Disconnected
-#define PATH_DIS 10
+#define PATH_DIS 11
 extern const char* topoPathTypeStr[];
+
+extern int64_t ncclParamPxnC2c();
 
 struct ncclTopoNode;
 struct ncclTopoLink {
@@ -130,6 +139,7 @@ struct ncclTopoNode {
     }gpu;
     struct {
       int dev; // Plugin dev number
+      uint64_t pciId;
       uint64_t asic;
       int port;
       float bw;
@@ -137,12 +147,13 @@ struct ncclTopoNode {
       int gdrSupport;
       int collSupport;
       int maxChannels;
+      int localGpu;
     }net;
     struct {
       int arch;
       int vendor;
       int model;
-      cpu_set_t affinity;
+      ncclAffinity affinity;
     }cpu;
     struct {
       uint64_t device;
@@ -168,6 +179,7 @@ struct ncclTopoSystem {
   struct ncclTopoNodeSet nodes[NCCL_TOPO_NODE_TYPES];
   float maxBw;
   float totalBw;
+  int inter;
 };
 
 ncclResult_t ncclTopoGetNode(struct ncclTopoSystem* system, struct ncclTopoNode** node, int type, uint64_t id);
@@ -181,6 +193,27 @@ ncclResult_t ncclTopoGetGpuMinPath(struct ncclTopoSystem* system, int type, int*
 ncclResult_t ncclTopoGetGpuMaxPath(struct ncclTopoSystem* system, int type, int* max);
 ncclResult_t ncclTopoSplitNvLink(struct ncclTopoSystem* system, int* splitNvLink);
 
+struct ncclTopoNetInfo {
+  bool coll;
+  // communicator-specific information
+  int netPluginIndex;
+  bool dmaBufSupport;
+  // NIC fusion
+  int mergeLevel;
+  const char* forceMerge;
+  // dev count tracking functions (not part of ncclNet)
+  ncclResult_t (*getDevCount)(int, int*, int*);
+  ncclResult_t (*setVirtDevCount)(int, int);
+  // ncclNet API functions
+  const char* name;
+  ncclResult_t (*getProperties)(int, ncclNetProperties_t*);
+  ncclResult_t (*makeVDevice)(int*, ncclNetVDeviceProps_t*);
+  ncclResult_t (*devices)(int*);
+};
+
+ncclResult_t ncclTopoProcessNet(ncclXml* xml, const char* dumpXmlFile, struct ncclTopoNetInfo* net);
+ncclResult_t ncclTopoGetFusionEnv(int* mergeLevel, const char** forceMerge);
+
 #define NCCL_TOPO_XML_MAX_NODES 256
 #define NCCL_GRAPH_XML_MAX_NODES 4096
 ncclResult_t ncclTopoGetSystemFromXml(struct ncclXml* xml, struct ncclTopoSystem** topoSystem, uint64_t localHostHash);
@@ -188,6 +221,7 @@ ncclResult_t ncclTopoGetGraphFromXml(struct ncclXmlNode *xmlGraphs, struct ncclT
 ncclResult_t ncclTopoGetXmlFromGraphs(int ngraphs, struct ncclTopoGraph** graphs, struct ncclTopoSystem* system, struct ncclXml *xml);
 
 ncclResult_t ncclTopoGetCompCap(struct ncclTopoSystem* system, int* ccMin, int* ccMax);
+ncclResult_t ncclTopoGetMinNetBw(struct ncclTopoSystem* system, float* bw);
 
 static ncclResult_t ncclTopoIdToIndex(struct ncclTopoSystem* system, int type, int64_t id, int* index) {
   *index = -1;
@@ -200,7 +234,7 @@ static ncclResult_t ncclTopoIdToIndex(struct ncclTopoSystem* system, int type, i
   return ncclInternalError;
 }
 
-static ncclResult_t ncclTopoRankToIndex(struct ncclTopoSystem* system, int rank, int* index) {
+static ncclResult_t ncclTopoRankToIndex(struct ncclTopoSystem* system, int rank, int* index, bool showWarn) {
   *index = -1;
   for (int i=0; i<system->nodes[GPU].count; i++) {
     if (system->nodes[GPU].nodes[i].gpu.rank == rank) {
@@ -208,6 +242,7 @@ static ncclResult_t ncclTopoRankToIndex(struct ncclTopoSystem* system, int rank,
       return ncclSuccess;
     }
   }
+  if (showWarn) WARN("ncclTopoRankToIndex could not find rank %d", rank);
   return ncclInternalError;
 }
 
@@ -222,6 +257,8 @@ static ncclResult_t ncclTopoDevToRank(struct ncclTopoSystem* system, int dev, in
   }
   return ncclInternalError;
 }
+
+extern struct kvDict nicPathKvList[];
 
 static ncclResult_t ncclTopoIdToNetDev(struct ncclTopoSystem* system, int64_t id, int* netDev) {
   *netDev = -1;

@@ -8,8 +8,9 @@
 #define NCCL_COLLECTIVES_H_
 
 #include "nccl.h"
-#include "nccl_common.h"
+#include "nccl_tuner.h"
 #include "device.h"
+#include "compiler.h"
 
 #define NCCL_MAX_NET_SIZE (1024*1024*1024L) // Rather than send INT_MAX which is 2G-1, send a power of two.
 
@@ -18,10 +19,16 @@
 #define ALLREDUCE_CHUNKSTEPS (NCCL_STEPS/2)
 #define ALLGATHER_SLICESTEPS (NCCL_STEPS/4)
 #define ALLGATHER_CHUNKSTEPS (NCCL_STEPS/2)
+#define ALLTOALL_SLICESTEPS 1
+#define ALLTOALL_CHUNKSTEPS 1
 #define REDUCESCATTER_SLICESTEPS (NCCL_STEPS/4)
 #define REDUCESCATTER_CHUNKSTEPS (NCCL_STEPS/2)
 #define BROADCAST_SLICESTEPS 1
 #define BROADCAST_CHUNKSTEPS 1
+#define GATHER_SLICESTEPS 1
+#define GATHER_CHUNKSTEPS 1
+#define SCATTER_SLICESTEPS 1
+#define SCATTER_CHUNKSTEPS 1
 #define REDUCE_SLICESTEPS 1
 #define REDUCE_CHUNKSTEPS 1
 #define NCCL_MAX_SLICE_PER_CHUNK 2  // max value for CHUNKSTEPS/SLICESTEPS, must accord with above
@@ -95,10 +102,10 @@ public:
   virtual void getNextSendAddr(int curStep, uint8_t **sendbuffOut, size_t *sizeOut, void **mhandleOut) = 0;
   virtual void getNextRecvAddr(int curStep, uint8_t **recvbuffOut, size_t *sizeOut, void **mhandleOut) = 0;
   int incRefCount() {
-    return __atomic_add_fetch(&refCount, 1, __ATOMIC_RELAXED);
+    return COMPILER_ATOMIC_ADD_FETCH(&refCount, 1, std::memory_order_relaxed);
   }
   int decRefCount() {
-    return __atomic_sub_fetch(&refCount, 1, __ATOMIC_RELEASE);
+    return COMPILER_ATOMIC_SUB_FETCH(&refCount, 1, std::memory_order_release);
   }
   RingAlgorithm() { refCount = 0; }
   virtual ~RingAlgorithm() {};
@@ -462,7 +469,7 @@ class PatRSAlgorithm{
 #ifdef __CUDA_ARCH__
       __ffs(i);
 #else
-      __builtin_ffs(i);
+      COMPILER_FFS(i);
 #endif
     return ffs ? ffs-1 : max;
   }
@@ -488,7 +495,7 @@ class PatRSAlgorithm{
 #ifdef __CUDA_ARCH__
       __popc(i);
 #else
-      __builtin_popcount(i);
+      COMPILER_POPCOUNT32(i);
 #endif
     return nbits;
   }
@@ -719,7 +726,7 @@ class PatAGAlgorithm{
 #ifdef __CUDA_ARCH__
       __ffs(i);
 #else
-      __builtin_ffs(i);
+      COMPILER_FFS(i);
 #endif
     return ffs ? ffs-1 : max;
   }
