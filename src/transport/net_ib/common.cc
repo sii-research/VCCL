@@ -18,6 +18,7 @@ int ncclIbRelaxedOrderingEnabled = 0;
 ncclProfilerCallback_t ncclProfilerFunction;
 
 NCCL_PARAM(IbAsyncEvents,"IB_RETURN_ASYNC_EVENTS",1);
+NCCL_PARAM(EnableFaultTolerance, "ENABLE_FAULT_TOLERANCE", 0);
 
 ncclResult_t ncclIbStatsCheckFatalCount(struct ncclIbStats* stat, const char* funcName) {
   if (ncclParamIbAsyncEvents() && COMPILER_ATOMIC_LOAD(&stat->fatalErrorCount, std::memory_order_relaxed)) {
@@ -27,13 +28,15 @@ ncclResult_t ncclIbStatsCheckFatalCount(struct ncclIbStats* stat, const char* fu
   return ncclSuccess;
 }
 
+
+
 struct ncclIbNetCommDevBase* ncclIbGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex) {
   if (base->isSend) {
     struct ncclIbSendComm* sComm = (struct ncclIbSendComm*) base;
-    return &sComm->devs[devIndex].base;
+    return if_backup ? &sComm->backupDevs[devIndex].base : &sComm->devs[devIndex].base;
   } else {
     struct ncclIbRecvComm* rComm = (struct ncclIbRecvComm*) base;
-    return &rComm->devs[devIndex].base;
+    return if_backup ? &rComm->backupDevs[devIndex].base : &rComm->devs[devIndex].base;
   }
 }
 
@@ -52,19 +55,22 @@ void* ncclIbAsyncThreadMain(void* args) {
     case IBV_EVENT_DEVICE_FATAL:
       // the above is device fatal error
       WARN("NET/IB : %s:%d async fatal event: %s", dev->devName, dev->portNum, str);
-      ncclIbDevFatalError(dev);
+      // Goto Fault Tolerance if enable
+      if (!ncclParamEnableFaultTolerance()) ncclIbDevFatalError(dev);
       break;
     case IBV_EVENT_CQ_ERR:
       // the above is a CQ fatal error
       WARN("NET/IB : %s:%d async fatal event on CQ (%p): %s", dev->devName, dev->portNum, cq, str);
-      ncclIbCqFatalError(cq);
+      // Goto Fault Tolerance if enable
+      if (!ncclParamEnableFaultTolerance()) ncclIbCqFatalError(cq);
       break;
     case IBV_EVENT_QP_FATAL:
     case IBV_EVENT_QP_REQ_ERR:
     case IBV_EVENT_QP_ACCESS_ERR:
       // the above are QP fatal errors
       WARN("NET/IB : %s:%d async fatal event on QP (%p): %s", dev->devName, dev->portNum, qp, str);
-      ncclIbQpFatalError(qp);
+      // Goto Fault Tolerance if enable
+      if (!ncclParamEnableFaultTolerance()) ncclIbQpFatalError(qp);
       break;
     case IBV_EVENT_SRQ_ERR:
       // SRQ are not used in NCCL

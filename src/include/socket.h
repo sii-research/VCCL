@@ -110,5 +110,6 @@ ncclResult_t ncclSocketMultiOp(struct ncclSocketOp* ops, int numOps);
 ncclResult_t ncclSocketTryRecv(struct ncclSocket* sock, void* ptr, int size, int* closed, bool blocking);
 ncclResult_t ncclSocketShutdown(struct ncclSocket* sock, int how);
 ncclResult_t ncclSocketClose(struct ncclSocket* sock, bool wait = false);
+ncclResult_t get_ip_address(struct sockaddr *sa, char *ip);
 uint16_t ncclSocketToPort(union ncclSocketAddress *addr);
 #endif

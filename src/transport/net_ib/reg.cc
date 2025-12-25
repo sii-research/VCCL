@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "common.h"
+extern int64_t ncclParamEnableFaultTolerance();
 
 ncclResult_t ncclIbRegMrDmaBufInternal2(ncclIbNetCommDevBase* base, void* data, size_t size, int type, uint64_t offset, int fd, uint64_t mrFlags, ibv_mr** mhandle) {
   static thread_local uintptr_t pageSize = 0;
@@ -67,8 +68,14 @@ ncclResult_t ncclIbRegMrDmaBufInternal(void* comm, void* data, size_t size, int 
   struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) malloc(sizeof(struct ncclIbMrHandle));
   for (int i = 0; i < base->vProps.ndevs; i++) {
     // Each ncclIbNetCommDevBase is at different offset in send and recv netComms
-    struct ncclIbNetCommDevBase* devComm = ncclIbGetNetCommDevBase(base, i);
+    struct ncclIbNetCommDevBase* devComm = ncclIbGetNetCommDevBase(base, i, false);
     NCCLCHECKGOTO(ncclIbRegMrDmaBufInternal2(devComm, data, size, type, offset, fd, mrFlags, mhandleWrapper->mrs + i), ret, fail);
+
+    // fill backup mhandleWrapper->mrs
+    if (ncclParamEnableFaultTolerance()) {
+      struct ncclIbNetCommDevBase *backupDevComm = ncclIbGetNetCommDevBase(base, i, true);
+      NCCLCHECKGOTO(ncclIbRegMrDmaBufInternal2(backupDevComm, data, size, type, offset, fd, mrFlags, mhandleWrapper->mrs + i + NCCL_IB_MAX_DEVS_PER_NIC), ret, fail);
+    }
   }
   *mhandle = (void*) mhandleWrapper;
 exit:
@@ -114,8 +121,13 @@ ncclResult_t ncclIbDeregMr(void* comm, void* mhandle) {
   struct ncclIbNetCommBase* base = (struct ncclIbNetCommBase*) comm;
   for (int i = 0; i < base->vProps.ndevs; i++) {
     // Each ncclIbNetCommDevBase is at different offset in send and recv netComms
-    struct ncclIbNetCommDevBase* devComm = ncclIbGetNetCommDevBase(base, i);
+    struct ncclIbNetCommDevBase* devComm = ncclIbGetNetCommDevBase(base, i, false);
     NCCLCHECK(ncclIbDeregMrInternal(devComm, mhandleWrapper->mrs[i]));
+
+    if (ncclParamEnableFaultTolerance()) {
+      struct ncclIbNetCommDevBase *backupDevComm = ncclIbGetNetCommDevBase(base, i, true);
+      NCCLCHECK(ncclIbDeregMrInternal(backupDevComm, mhandleWrapper->mrs[i + NCCL_IB_MAX_DEVS_PER_NIC]));
+    }
   }
   free(mhandleWrapper);
   return ncclSuccess;

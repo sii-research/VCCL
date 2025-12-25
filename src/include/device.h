@@ -164,6 +164,7 @@ struct ncclConnector {
   struct ncclTransportComm* transportComm;
   void* transportResources;
   struct ncclConnInfo conn;
+  bool noUsePxnTransport;
 };
 
 struct ncclRing {
@@ -223,7 +224,7 @@ struct ncclNvls {
 #define NCCL_MAX_ARITY NCCL_MAX_DIRECT_ARITY
 #endif
 
-#define NCCL_MAX_CONNS 2
+#define NCCL_MAX_CONNS 4
 struct ncclChannelPeer {
   struct ncclConnector send[NCCL_MAX_CONNS];
   struct ncclConnector recv[NCCL_MAX_CONNS];

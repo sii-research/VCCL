@@ -28,6 +28,8 @@ struct ncclInfo {
   // Algorithm details
   int chunkSteps;
   int sliceSteps;
+  unsigned long long ncclFuncTimes;
+  uint64_t groupHash;
   // One-sided ops
   size_t peerWinOffset;
   ncclWindow_t peerWin;

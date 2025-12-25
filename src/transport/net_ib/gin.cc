@@ -401,7 +401,7 @@ ncclResult_t ncclGinIbProxyIPut(void *collComm, uint64_t srcOff, void *srcMhandl
 
   struct ibv_send_wr* bad_wr;
   NCCLCHECK(wrap_ibv_post_send(qp->qp, &wr, &bad_wr));
-  ncclIbAddEvent(req, qp->devIndex);
+  ncclIbAddEvent(req, qp->devIndex, false);
 
   *request = req;
   return ncclSuccess;
@@ -484,7 +484,7 @@ ncclResult_t ncclGinIbProxyIPutSignal(void *collComm, uint64_t srcOff, void *src
   // Send the put and the signal in one go
   struct ibv_send_wr* bad_wr;
   NCCLCHECK(wrap_ibv_post_send(qp->qp, size > 0 ? &wr[0] : &wr[1], &bad_wr));
-  ncclIbAddEvent(req, qp->devIndex);
+  ncclIbAddEvent(req, qp->devIndex, false);
   *request = req;
   return ncclSuccess;
 }

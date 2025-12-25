@@ -22,6 +22,27 @@ NCCL_PARAM(PollTimeOut, "SOCKET_POLL_TIMEOUT_MSEC", 0);
 NCCL_PARAM(SocketMaxRecvBuff, "SOCKET_RCVBUF", -1);
 NCCL_PARAM(SocketMaxSendBuff, "SOCKET_SNDBUF", -1);
 
+extern char global_hostname[1024];
+
+ncclResult_t get_ip_address(struct sockaddr *sa, char *ip) {
+
+  switch (sa->sa_family) {
+  case AF_INET: { // IPv4
+    struct sockaddr_in *sa_in = (struct sockaddr_in *)sa;
+    inet_ntop(AF_INET, &(sa_in->sin_addr), ip, INET6_ADDRSTRLEN);
+    break;
+  }
+  case AF_INET6: { // IPv6
+    struct sockaddr_in6 *sa_in6 = (struct sockaddr_in6 *)sa;
+    inet_ntop(AF_INET6, &(sa_in6->sin6_addr), ip, INET6_ADDRSTRLEN);
+    break;
+  }
+  default:;
+    // printf("Unknown AF\n");
+  }
+  return ncclSuccess;
+}
+
 static ncclResult_t socketProgress(int op, struct ncclSocket* sock, void* ptr, int size, int* offset, int* pclosed = NULL) {
   int closed;
   NCCLCHECK(ncclOsSocketProgressOpt(op, sock, ptr, size, offset, 0, &closed));
@@ -31,8 +52,9 @@ static ncclResult_t socketProgress(int op, struct ncclSocket* sock, void* ptr, i
       return ncclSuccess;
     } else {
       char line[SOCKET_NAME_MAXLEN+1];
-      WARN("socketProgress: Connection closed by remote peer %s",
-           ncclSocketToString(&sock->addr, line, /*numericHostForm*/0));
+      char ip[INET6_ADDRSTRLEN];
+      get_ip_address(&sock->addr.sa, ip);
+      WARN("socketProgress: %s Connection closed by remote peer %s remote ip %s", global_hostname, ncclSocketToString(&sock->addr, line, 0), ip);
       return ncclRemoteError;
     }
   }

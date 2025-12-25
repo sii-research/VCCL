@@ -18,4 +18,13 @@ static inline ncclResult_t ncclIbRecvCommGetQpForCts(struct ncclIbRecvComm* recv
   return ncclSuccess;
 }
 
+static inline ncclResult_t ncclIbRecvCommGetBackupQpForCts(struct ncclIbRecvComm* recvComm, uint32_t id, ncclIbQp** qp) {
+  int devIndex = id % recvComm->base.vProps.ndevs;
+  // CTS message is always posted the first QP on the device
+  int qpIndex = 0;
+  ncclIbCommBaseGetBackupQpByIndex(&recvComm->base, devIndex, qpIndex, qp);
+  assert(*qp != NULL);
+  return ncclSuccess;
+}
+
 #endif // NET_IB_P2P_H_

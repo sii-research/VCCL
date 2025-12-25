@@ -29,12 +29,26 @@
 #include "timer.h"
 
 #include "ibvwrap.h"
+#define NET_IB_CC
+#include "timer_log.h"
 #include "mlx5/mlx5dvwrap.h"
 
 #define MAXSUFFIXSIZE 16
 #define MAXNAMESIZE (64 + MAXSUFFIXSIZE)
 extern char ncclIbIfName[MAX_IF_NAME_SIZE+1];
 extern union ncclSocketAddress ncclIbIfAddr;
+
+const long long second_to_nanoseconds = 1000000000;
+
+long long get_nanoseconds() {
+  long long ns = 0;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  ns += ts.tv_sec;
+  ns *= second_to_nanoseconds;
+  ns += ts.tv_nsec;
+  return ns;
+}
 
 struct ncclIbMr {
   uintptr_t addr;
@@ -101,6 +115,7 @@ struct alignas(64) ncclIbDev {
 #define MAX_IB_VDEVS MAX_IB_DEVS*8
 extern struct ncclIbMergedDev ncclIbMergedDevs[MAX_IB_VDEVS];
 extern struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
+extern int ncclIbBackupDevs[MAX_IB_DEVS];
 extern int ncclIbRelaxedOrderingEnabled;
 
 #define NCCL_IB_LLSTR(ll) (((ll) == IBV_LINK_LAYER_INFINIBAND) ? "IB" : (((ll) == IBV_LINK_LAYER_ETHERNET) ? "RoCE" : "UNSPECIFIED"))
@@ -127,6 +142,9 @@ struct ncclIbDevInfo {
 
   //remote dev info
   union ibv_gid remoteGid;
+
+  // SYNC FIFO RDMA INFO
+  uint32_t syncFifoRkey;
 };
 
 // Retain local RoCE address for error logging
@@ -170,10 +188,13 @@ struct ncclIbRequest {
   // The pointers are initialized only for the devices that the request expects
   // to receive completions from.
   struct ncclIbNetCommDevBase* devBases[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct ncclIbNetCommDevBase *backupDevBases[NCCL_IB_MAX_DEVS_PER_NIC];
 #ifdef NCCL_ENABLE_NET_PROFILING
   struct ncclProfilerInfo pInfo[NCCL_NET_IB_MAX_RECVS];
 #endif
   int nreqs;
+  long long time;
+  int time_out;
   union {
     struct {
       int size;
@@ -188,14 +209,36 @@ struct ncclIbRequest {
       int rank;
     } iput;
   };
+  struct timer_log log[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct linkStatusTest lTest[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct ibv_send_wr retransitionWr;
+  int retransitionDevIndex;
+  struct ncclIbSendFifo *retransitionElem;
+  struct ibv_sge retransitionSge;
+};
+
+struct ncclwarn {
+  bool is_warn = false;
+  int status;
+  int opcode;
+  int len;
+  int error;
+  std::string line;
+  std::string type;
+  std::string localGidstr;
+  std::string localGidstring;
+  std::string remoteGidstr;
+  std::string remoteGidstring;
 };
 
 struct ncclIbNetCommDevBase {
   int ibDevN;
   struct ibv_pd* pd;
   struct ibv_cq* cq;
+  struct ibv_cq *backupCq;
   uint64_t pad[2];
   struct ncclIbGidInfo gidInfo;
+  alignas(32) struct ncclwarn warn;
 };
 
 struct ncclIbSendFifo {
@@ -204,8 +247,17 @@ struct ncclIbSendFifo {
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
   uint32_t nreqs;
   uint32_t tag;
+  uint8_t if_backup;
   uint64_t idx;
-  char padding[16];
+  char padding[8];
+};
+
+// fifo for synchronizing when changing to backup
+struct alignas(32) ncclIbSyncFifo {
+  uint64_t recvFifoTail;    // get send fifo head, and roll back fifoTail to fifoHead
+  uint64_t restartPos;  // update recv sub->posted because recv sub->received may be greater than send sub->done
+  uint64_t idx;
+  int errPortIdx;
 };
 
 struct ncclIbQp {
@@ -215,11 +267,31 @@ struct ncclIbQp {
   // The index of the device on the remote side to which this QP is connected
   // to.
   int remDevIdx;
+  uint8_t srcIp[4];
+  uint8_t dscIp[4];
+  int channel_id;
+  int rank;
+  std::string NetworkCardName = "";
+  // use for reset qp when using backup qp
+  int ib_port;
+  ncclIbGidInfo gidInfo;
+  uint32_t dest_qp_num;
+  struct ncclIbDevInfo info;
+  struct ibv_ece ece;
+  int ece_supported;
+  int tc;
+  int sl;
 };
 
 // We need to support NCCL_NET_MAX_REQUESTS for each concurrent receive
 #define NET_IB_MAX_REQUESTS (NCCL_NET_MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS)
 static_assert(NET_IB_MAX_REQUESTS <= 256, "request id are encoded in wr_id and we need up to 8 requests ids per completion");
+
+struct ncclIbRemSyncFifo {
+  struct ncclIbSyncFifo elems[NET_IB_MAX_REQUESTS];
+  uint64_t syncFifoTail;
+  uint64_t addr;
+};
 
 // Structure to describe the completion records on the sender side.
 struct ncclIbRemCompletionsRecords {
@@ -234,12 +306,14 @@ struct ncclIbRemCompletionsRecords {
   // RKey (depending on the device being used) when it accesses the receiver's
   // completion records structure.
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
+  uint32_t backupRkeys[NCCL_IB_MAX_DEVS_PER_NIC];
 };
 
 // A per-dev struct for netIbSendComm
 struct alignas(8) ncclIbSendCommDev {
   struct ncclIbNetCommDevBase base;
   struct ibv_mr* ctsFifoMr;
+  struct ibv_mr* syncFifoMr;
   struct ibv_mr* putSignalScratchpadMr;
   struct ibv_mr* cmplsRecordsMr;
   struct ibv_sge sge;
@@ -248,17 +322,20 @@ struct alignas(8) ncclIbSendCommDev {
 
 // Wrapper to track an MR per-device, if needed
 struct ncclIbMrHandle {
-  ibv_mr* mrs[NCCL_IB_MAX_DEVS_PER_NIC];
+  ibv_mr* mrs[NCCL_IB_MAX_DEVS_PER_NIC * 2];
 };
 
 #define NCCL_IB_MAX_QPS 128
 
 struct alignas(32) ncclIbNetCommBase {
   ncclNetVDeviceProps_t vProps;
+  ncclNetVDeviceProps_t backupVProps;
   bool isSend;
   struct ncclIbRequest reqs[NET_IB_MAX_REQUESTS];
   struct ncclIbQp qps[NCCL_IB_MAX_QPS];
+  struct ncclIbQp backupQps[NCCL_IB_MAX_QPS];
   uint64_t fifoHead;
+  uint64_t syncFifoHead;
   int nqps;
   int splitDataOnQps;
   struct ncclSocket sock;
@@ -267,17 +344,28 @@ struct alignas(32) ncclIbNetCommBase {
   int nRemDevs;
   int nDataQps;
   struct ncclIbDevInfo remDevs[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct ncclIbDevInfo backupRemDevs[NCCL_IB_MAX_DEVS_PER_NIC];
   // statistics about the comm
   struct ncclIbStats stats;
+  // statistics about the backup comm
+  struct ncclIbStats backupStats;
 };
 
-struct ncclIbNetCommDevBase* ncclIbGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex);
+struct ncclIbNetCommDevBase* ncclIbGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex, bool if_backup);
 
 // qpIndex is the index relative to a device.
 static inline ncclResult_t ncclIbCommBaseGetQpByIndex(struct ncclIbNetCommBase* commBase, int devIndex, int qpIndex, ncclIbQp** qp) {
   assert(devIndex >= 0 && devIndex < commBase->vProps.ndevs);
   assert(qpIndex >= 0 && qpIndex < commBase->nDataQps);
   *qp = &(commBase->qps[commBase->nDataQps*qpIndex + devIndex]);
+  return ncclSuccess;
+}
+
+// qpIndex is the index relative to a device.(backup)
+static inline ncclResult_t ncclIbCommBaseGetBackupQpByIndex(struct ncclIbNetCommBase* commBase, int devIndex, int qpIndex, ncclIbQp** qp) {
+  assert(devIndex >= 0 && devIndex < commBase->vProps.ndevs);
+  assert(qpIndex >= 0 && qpIndex < commBase->nDataQps);
+  *qp = &(commBase->backupQps[commBase->nDataQps*qpIndex + devIndex]);
   return ncclSuccess;
 }
 
@@ -292,6 +380,13 @@ static inline ncclResult_t ncclIbCommBaseGetQpByIndex(struct ncclIbNetCommBase* 
 static inline ncclResult_t ncclIbCommBaseGetQpForRequest(struct ncclIbNetCommBase* baseComm, const uint32_t id, const uint8_t qpIndex, ncclIbQp** outQp, int* outQpIndex) {
   *outQpIndex = (id + qpIndex) % baseComm->nqps;
   *outQp = &(baseComm->qps[*outQpIndex]);
+  assert(*outQp != NULL);
+  return ncclSuccess;
+}
+
+static inline ncclResult_t ncclIbCommBaseGetBackupQpForRequest(struct ncclIbNetCommBase* baseComm, const uint32_t id, const uint8_t qpIndex, ncclIbQp** outQp, int* outQpIndex) {
+  *outQpIndex = (id + qpIndex) % baseComm->nqps;
+  *outQp = &(baseComm->backupQps[*outQpIndex]);
   assert(*outQp != NULL);
   return ncclSuccess;
 }
@@ -314,12 +409,21 @@ struct ncclIbSendComm {
   struct ibv_send_wr wrs[NCCL_NET_IB_MAX_RECVS + 1];
   // Each dev correlates to a mergedIbDev
   struct ncclIbSendCommDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct ncclIbSendCommDev backupDevs[NCCL_IB_MAX_DEVS_PER_NIC];
   struct ncclIbRequest* fifoReqs[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   // Structure to hold all the related structures regarding the completions
   // records structure.
   struct ncclIbRemCompletionsRecords remCmplsRecords;
   int ar; // Use adaptive routing when all merged devices have it enabled
   uint64_t putSignalScratchpad;
+  int backupAr;
+  uint8_t func;
+  unsigned long long ncclFuncTimes;
+  int peerRank;
+  int rank;
+  uint64_t groupHash;
+  struct ncclIbSyncFifo syncFifo[NET_IB_MAX_REQUESTS];
+  int sendCcCnt;         // use for refresh devstate, when sendCcCnt % 600 == 0, we can refresh devstate
 };
 // The SendFifo needs to be 32-byte aligned and each element needs
 // to be a 32-byte multiple, so that an entry does not get split and
@@ -349,6 +453,7 @@ struct ncclIbRemCtsFifo {
   // RKey (depending on the device being used) when it posts a CTS to the
   // sender
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
+  uint32_t backupRkeys[NCCL_IB_MAX_DEVS_PER_NIC];
   uint32_t flags;
 };
 
@@ -369,11 +474,14 @@ struct alignas(16) ncclIbRecvCommDev {
   // posts RDMA operations. The SGE is populated by the address of the memory
   // in which the CTS message formatted on the receiver is placed.
   struct ibv_sge sge;
+  struct ibv_mr *syncFifoMr;
+  struct ibv_sge syncFifoSge;
 };
 
 struct ncclIbRecvComm {
   struct ncclIbNetCommBase base;
   struct ncclIbRecvCommDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct ncclIbRecvCommDev backupDevs[NCCL_IB_MAX_DEVS_PER_NIC];
   // Structure to hold all the related structures regarding the CTS FIFO
   // structure.
   struct ncclIbRemCtsFifo remCtsFifo;
@@ -382,6 +490,9 @@ struct ncclIbRecvComm {
   int cmplsRecords[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   int gpuFlushHostMem;
   int flushEnabled;
+  int backupFlushEnabled;
+  struct ncclIbRemSyncFifo remSyncFifo;
+  int recvCcCnt; // use for refresh devstate, when recvCcCnt % 600 == 0, we can refresh devstate
 };
 static_assert((offsetof(struct ncclIbRecvComm, remCtsFifo) % 32) == 0, "ncclIbRecvComm ctsFifo must be 32-byte aligned");
 
@@ -417,7 +528,7 @@ void* ncclIbAsyncThreadMain(void* args);
 ncclResult_t ncclIbGdrSupport();
 ncclResult_t ncclIbDmaBufSupport(int dev);
 
-void ncclIbAddEvent(struct ncclIbRequest* req, int devIndex);
+void ncclIbAddEvent(struct ncclIbRequest* req, int devIndex, bool if_backup);
 ncclResult_t ncclIbGetGidIndex(struct ibv_context *context, uint8_t portNum, struct ibv_port_attr* portAttr, int *gidIndex);
 ncclResult_t ncclIbGetRequest(struct ncclIbNetCommBase* base, struct ncclIbRequest** req);
 ncclResult_t ncclIbFreeRequest(struct ncclIbRequest* r);

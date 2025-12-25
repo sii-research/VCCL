@@ -254,6 +254,8 @@ struct ncclTaskP2p {
   ncclDataType_t datatype;
   int root;
   size_t bytes;
+  unsigned long long ncclFuncTimes;
+  uint64_t groupHash;
   bool allowUB;
 
   // Profiler plugin
@@ -744,6 +746,8 @@ struct ncclComm {
   bool ginSupport;
   bool rmaProxySupport;
   int childCount;
+  uint64_t groupHash;
+  unsigned long long ncclFuncTimes;
 
   struct ncclDevrState devrState; // The symmetric runtime state
   struct ncclSymkState symkState; // The symmetric kernels state (built on previous)
