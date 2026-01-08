@@ -250,13 +250,14 @@ void* timerLogService(void *args){
                 }
                 previousMeanBandwidths[ncclFuncIndex][devIndex] = std::max(meanBandwidth, previousMeanBandwidths[ncclFuncIndex][devIndex]);
 
-                // reset for new duration
-                telemetryBandwidthInfo.startTime = 0;
+                // reset per (func, dev) metrics for new duration
                 telemetryBandwidthInfo.maxBandwidths[ncclFuncIndex][devIndex] = 0;
                 telemetryBandwidthInfo.meanBandwidths[ncclFuncIndex][devIndex] = 0;
                 telemetryBandwidthInfo.bandwidthCounts[ncclFuncIndex][devIndex] = 0;
               }
             }
+            // reset global duration start time once after processing all entries
+            telemetryBandwidthInfo.startTime = 0;
           }
         }
       }
