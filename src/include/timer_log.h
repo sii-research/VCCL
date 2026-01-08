@@ -16,6 +16,9 @@
 #include <deque>
 #include <queue>
 #include <stack>
+#include <unordered_map>
+#include <vector>
+#include <atomic>
 
 enum timer_log_type{
   NCCL_LOG_NOT_USE = 0,
@@ -88,89 +91,207 @@ void* timerLogService(void *args);
 void printLogInfo(struct timer_log log);
 
 
-#define TIMER_LOG_MAX_LEN 50010
+#define RING_BUFFER_SIZE 262144
+#define RING_BUFFER_MASK (RING_BUFFER_SIZE - 1)
+
+template <typename T>
+class LogQueue {
+public:
+  LogQueue() : head_(0), tail_(0) {
+    buffer_.resize(RING_BUFFER_SIZE);
+  }
+
+  bool enqueue(const T &item) {
+    const size_t curr_tail = tail_.load(std::memory_order_relaxed);
+    const size_t next_tail = (curr_tail + 1) & RING_BUFFER_MASK;
+
+    if (next_tail == head_.load(std::memory_order_acquire)) {
+      return false;
+    }
+
+    buffer_[curr_tail] = item;
+    tail_.store(next_tail, std::memory_order_release);
+    return true;
+  }
+
+  bool dequeue(T &item) {
+    const size_t curr_head = head_.load(std::memory_order_relaxed);
+
+    if (curr_head == tail_.load(std::memory_order_acquire)) {
+      return false;
+    }
+
+    item = buffer_[curr_head];
+    head_.store((curr_head + 1) & RING_BUFFER_MASK, std::memory_order_release);
+    return true;
+  }
+
+  bool empty() const {
+    return head_.load(std::memory_order_relaxed) == tail_.load(std::memory_order_acquire);
+  }
+
+private:
+  alignas(64) std::atomic<size_t> head_;
+  alignas(64) std::atomic<size_t> tail_;
+  std::vector<T> buffer_;
+};
+
+struct RemainLogNode {
+  unsigned long long ncclFuncTimes;
+  timer_log log;
+  RemainLogNode* next;
+  RemainLogNode* prev;
+};
+
+struct RemainLogList {
+  RemainLogNode* head;
+  RemainLogNode* tail;
+  std::unordered_map<unsigned long long, RemainLogNode*> logMap[4];
+
+  RemainLogList() {
+    head = new RemainLogNode();
+    head->next = nullptr;
+    head->prev = nullptr;
+    tail = head;
+  }
+
+  ~RemainLogList() {
+    RemainLogNode* current = head;
+    while (current) {
+      RemainLogNode* temp = current;
+      current = current->next;
+      delete temp;
+    }
+  }
+public:
+  void push(const timer_log& log) {
+    if (logMap[log.devIndex].find(log.ncclFuncTimes) != logMap[log.devIndex].end()) {
+      // Directly merge to existing log
+      RemainLogNode* existingNode = logMap[log.devIndex][log.ncclFuncTimes];
+      existingNode->log.size += log.size;
+      existingNode->log.diff = log.diff;
+      existingNode->prev->next = existingNode->next;
+      if (existingNode->next) {
+        existingNode->next->prev = existingNode->prev;
+      } else {
+        tail = existingNode->prev;
+      }
+      existingNode->next = nullptr;
+      existingNode->prev = tail;
+      tail->next = existingNode;
+      tail = existingNode;
+      return;
+    }
+    RemainLogNode* newNode = new RemainLogNode();
+    newNode->ncclFuncTimes = log.ncclFuncTimes;
+    newNode->log = log;
+    newNode->next = head;
+    tail->next = newNode;
+    tail = newNode;
+    logMap[log.devIndex][log.ncclFuncTimes] = newNode;
+    return;
+  }
+
+  bool get_front(timer_log& log) {
+    if (head->next == nullptr) return false;
+    RemainLogNode* temp = head->next;
+    log = temp->log;
+    return true;
+  }
+
+  bool pop_front() {
+    if (head->next == nullptr) return false;
+    RemainLogNode *temp = head->next;
+    if (temp == tail) {
+      tail = head;
+    }
+    head->next = temp->next;
+    logMap[temp->log.devIndex].erase(temp->ncclFuncTimes);
+    delete temp;
+    return true;
+  }
+};
+
 struct timer_log_queue{
   pthread_t thread;
   pthread_mutex_t lock;
   std::mutex telemetryStateLock;
   volatile int state;
   volatile int stop;
-  std::deque<timer_log> log;
+  LogQueue<timer_log> log;
   std::queue<timer_log> slideWindow[4];     // different port
-  volatile unsigned long long windowDataSizes[4];
+  volatile unsigned long long windowDataSizes[4]; 
   volatile unsigned long long sendEndTime[4];  // count the timestamp of the last log in slideWindow
-  volatile timer_log* lastLog[4];             // the last log of different devIndex in Log, for push operation when log is full
+  RemainLogList remainLog;
   volatile bool collect;
   volatile int live = -1;
+  int maxNcclFuncTimes = 0;
 
   void push(struct timer_log& _log){
-    if (log.size() >= TIMER_LOG_MAX_LEN) {
-      if (lastLog[_log.devIndex]!= NULL && lastLog[_log.devIndex]->ncclFuncTimes == _log.ncclFuncTimes) {
-        // merge the new log into before one
-        lastLog[_log.devIndex]->size += _log.size;
-        lastLog[_log.devIndex]->diff = _log.diff;
-        lastLog[_log.devIndex]->func = _log.func;
+    // First check if there are remained logs to be enqueued first
+    timer_log remainLogItem;
+    while (remainLog.get_front(remainLogItem)) {
+      if (log.enqueue(remainLogItem)) {
+        remainLog.pop_front();
+        continue;
+      } else {
+        break;
       }
-      else {
-        // merge the first two log that have same ncclFuncTimes
-        std::stack<timer_log> stk;
-        while(!log.empty()){
-          timer_log frontLog = log.front();
-          log.pop_front();
-          if (!stk.empty() && stk.top().ncclFuncTimes == frontLog.ncclFuncTimes && stk.top().devIndex == frontLog.devIndex) {
-            stk.top().size += frontLog.size;
-            stk.top().diff = frontLog.diff;
-            break;
-          }
-          stk.push(frontLog);
-        }
-        while(!stk.empty()) {
-          timer_log topLog = stk.top();
-          log.push_front(topLog);
-          stk.pop();
-        }
-        log.push_back(_log);
-        lastLog[_log.devIndex] = &log.back();
-      }
-    }
-    else {
-      log.push_back(_log);
-      lastLog[_log.devIndex] = &log.back();
-    }
-    return;
-  }
-  struct timer_log pop(){
-    if (log.empty()) {
-      struct timer_log res;
-      memset((void *)&res, 0, sizeof(res));
-      return res;
-    }
-    timer_log popLog = log.front();
-    // judge if the pop one is the last log of its devIndesx
-    if (lastLog[popLog.devIndex] == &log.front())
-    {
-      lastLog[popLog.devIndex] = NULL;
     }
 
-    log.pop_front(); 
-    return popLog;
+    // Second enqueue the new log
+    if (log.enqueue(_log)) {
+      return;
+    }
+
+    // Third, if the log queue is full, try to merge the new log into last one
+    remainLog.push(_log);
+    return;
   }
+
+  struct timer_log pop(){
+    timer_log _log;
+    if (!log.dequeue(_log)) {
+      // return an empty log
+      timer_log emptyLog;
+      memset((void*)&emptyLog, 0, sizeof(timer_log));
+      return emptyLog;
+    }
+    return _log;
+  }
+
+  struct std::vector<timer_log> pop_all(){
+    std::vector<timer_log> res;
+    timer_log _log;
+    while (log.dequeue(_log)) {
+      res.push_back(_log);
+    }
+    return res;
+  }
+
   bool empty() {
-    while (!log.empty()) {
-      log.pop_back();
+    timer_log _log;
+    while (log.dequeue(_log)) {
+      continue;
     }
     return true;
   }
 
   void pushSlideWindow(struct timer_log& _log, int devIndex) {
-    if (!slideWindow[devIndex].empty() && 
-        (slideWindow[devIndex].back().ncclFuncTimes != _log.ncclFuncTimes)) {
-      emptySlideWindow(devIndex);
-      lastLog[0] = NULL;
-      lastLog[1] = NULL;
-      lastLog[2] = NULL;
-      lastLog[3] = NULL;
-      windowDataSizes[devIndex] = 0;
+    if (!slideWindow[devIndex].empty() && _log.ncclFuncTimes > maxNcclFuncTimes) {
+      int prev_bandwidths = getBandWidths(devIndex);
+
+      // if the bandwidth drop too much, clear the slide window
+      unsigned long long sendTime = _log.diff - slideWindow[devIndex].front().diff;
+      unsigned long long sendDataSizes = windowDataSizes[devIndex] + _log.size - slideWindow[devIndex].front().size;
+      // 0.93 = 1e9 / 1024 * 1024 * 1024
+      int curr_bandwidths = sendDataSizes * 0.93 * 8 / sendTime;
+      if (curr_bandwidths < prev_bandwidths / 2) {
+        // clear slide window
+        emptySlideWindow(devIndex);
+        windowDataSizes[devIndex] = 0;
+      }
+      maxNcclFuncTimes = _log.ncclFuncTimes;
     }
     if (slideWindow[devIndex].size() >= maxWindowSize) {
       timer_log frontLog = slideWindow[devIndex].front();
@@ -218,16 +339,13 @@ struct timer_log_queue{
       windowDataSizes[1] = 0;
       windowDataSizes[2] = 0;
       windowDataSizes[3] = 0;
-      lastLog[0] = NULL;
-      lastLog[1] = NULL;
-      lastLog[2] = NULL;
-      lastLog[3] = NULL;
       collect = 0;
       live = 1;
       pthread_mutex_init(&lock, NULL);
       pthread_create(&thread, NULL, timerLogService, NULL);
     }
   }
+
   bool setState(int to){
     // return 1;
 
@@ -239,11 +357,13 @@ struct timer_log_queue{
     }
     return 0;
   } 
+
   void freeState(){
     // pthread_mutex_lock(&lock);
     state = 0;
     // pthread_mutex_unlock(&lock);
   }
+
   void destroy(){
     std::lock_guard<std::mutex> stateLock(telemetryStateLock);
     if(live == 1){
