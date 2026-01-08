@@ -60,9 +60,9 @@ struct TelemetryBandwidthInfo {
   int bandwidthCounts[ncclNumFuncs][2];
 };
 static TelemetryBandwidthInfo telemetryBandwidthInfo;
-static unsigned long long pinpointDuration = 100 * 1000 * 1000; // 1 ms
+static unsigned long long pinpointDuration = 100 * 1000 * 1000; // 100 ms
 static int previousMeanBandwidths[ncclNumFuncs][2] = {0};
-static bool occurAbnoraml[ncclNumFuncs][2] = {false};
+static bool occurAbnormal[ncclNumFuncs][2] = {false};
 
 void* timerLogService(void *args){
   // signal(SIGPIPE, sigpipe_handler);
@@ -98,7 +98,7 @@ void* timerLogService(void *args){
             continue;
           }
 
-          // update slide winrow
+          // update slide window
           global_timer_log.pushSlideWindow(log, log.devIndex);
           if (global_timer_log.slideWindow[log.devIndex].size() < maxWindowSize) {
             continue;
@@ -232,7 +232,7 @@ void* timerLogService(void *args){
                 (*pFile) << dataBuffer << std::endl;*/
 
                 // judge if exists exception
-                if (!occurAbnoraml[ncclFuncIndex][devIndex] && meanBandwidth < previousMeanBandwidths[ncclFuncIndex][devIndex] / 2) {
+                if (!occurAbnormal[ncclFuncIndex][devIndex] && meanBandwidth < previousMeanBandwidths[ncclFuncIndex][devIndex] / 2) {
                   // exception
                   PortLogs &portLogs = logFilesMap[devIndex];
                   std::ofstream *pFile = &portLogs.files[portLogs.currentFile];
@@ -243,10 +243,10 @@ void* timerLogService(void *args){
                           meanBandwidth,
                           1);
                   (*pFile) << dataBuffer << std::endl;
-                  occurAbnoraml[ncclFuncIndex][devIndex] = true;
+                  occurAbnormal[ncclFuncIndex][devIndex] = true;
                 }
                 else if (meanBandwidth >= previousMeanBandwidths[ncclFuncIndex][devIndex] / 2){
-                  occurAbnoraml[ncclFuncIndex][devIndex] = false;
+                  occurAbnormal[ncclFuncIndex][devIndex] = false;
                 }
                 previousMeanBandwidths[ncclFuncIndex][devIndex] = std::max(meanBandwidth, previousMeanBandwidths[ncclFuncIndex][devIndex]);
 

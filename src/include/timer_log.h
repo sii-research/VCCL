@@ -185,7 +185,8 @@ public:
     RemainLogNode* newNode = new RemainLogNode();
     newNode->ncclFuncTimes = log.ncclFuncTimes;
     newNode->log = log;
-    newNode->next = head;
+    newNode->next = nullptr;
+    newNode->prev = tail;
     tail->next = newNode;
     tail = newNode;
     logMap[log.devIndex][log.ncclFuncTimes] = newNode;
