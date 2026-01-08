@@ -153,7 +153,7 @@ void* timerLogService(void *args){
           if (log.diff == 0) {
             continue;
           }
-          // update slide winrow
+          // update slide window
           global_timer_log.pushSlideWindow(log, log.devIndex);
           if (global_timer_log.slideWindow[log.devIndex].size() < maxWindowSize) {
             continue;
