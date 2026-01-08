@@ -3597,10 +3597,8 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
 
                 if(sendReq->log[i].size > 16){
                   // save log
-                  pthread_mutex_lock(&global_timer_log.lock);
                   __sync_synchronize();
                   global_timer_log.push(sendReq->log[i]);
-                  pthread_mutex_unlock(&global_timer_log.lock);
                 }
               }
 #ifdef NCCL_ENABLE_NET_PROFILING
