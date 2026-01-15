@@ -46,6 +46,7 @@ struct timer_log{
   int sendWrCounter;
   int devIndex;
   int remainWrDataSize;
+  int bandwidths;
 };
 
 // define the size of windowsSize
