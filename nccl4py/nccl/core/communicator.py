@@ -1240,14 +1240,10 @@ class Communicator:
         Args:
             - sendbuf (NcclBufferSpec): Source buffer containing the concatenated send data.
             - recvbuf (NcclBufferSpec): Destination buffer for received data.
-            - sendcounts (Sequence[int]): Elements to send to each rank. Accepts length == nranks
-            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
-            - sdispls (Sequence[int]): Element displacements in sendbuf. Accepts length == nranks
-            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
-            - recvcounts (Sequence[int]): Elements expected from each rank. Accepts length == nranks
-            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
-            - rdispls (Sequence[int]): Element displacements in recvbuf. Accepts length == nranks
-            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
+        - sendcounts (Sequence[int]): Elements to send to each rank (length == nranks*nranks).
+        - sdispls (Sequence[int]): Element displacements in sendbuf (length == nranks*nranks).
+        - recvcounts (Sequence[int]): Elements expected from each rank (length == nranks*nranks).
+        - rdispls (Sequence[int]): Element displacements in recvbuf (length == nranks*nranks).
             - relaybuf (NcclBufferSpec | None): Optional relay buffer. Defaults to None.
             - stream (NcclStreamSpec, optional): CUDA stream for the operation. Defaults to None.
 
@@ -1278,32 +1274,16 @@ class Communicator:
         rdispls_arr = _np.asarray(rdispls, dtype=_np.int64)
 
         def _parse_counts_displs(counts, displs, label):
-            if counts.ndim == 2 or displs.ndim == 2:
-                if counts.shape != (self.nranks, self.nranks) or displs.shape != (
-                    self.nranks,
-                    self.nranks,
-                ):
-                    raise NcclInvalid(
-                        f"{label} must have shape ({self.nranks}, {self.nranks})"
-                    )
-                counts_row = counts[self.rank]
-                displs_row = displs[self.rank]
-                return counts.reshape(-1), displs.reshape(-1), counts_row, displs_row
-
             if counts.ndim != 1 or displs.ndim != 1:
-                raise NcclInvalid(f"{label} must be 1D or 2D arrays")
-
-            if counts.size == self.nranks * self.nranks and displs.size == self.nranks * self.nranks:
-                counts_mat = counts.reshape(self.nranks, self.nranks)
-                displs_mat = displs.reshape(self.nranks, self.nranks)
-                return counts, displs, counts_mat[self.rank], displs_mat[self.rank]
-
-            if counts.size != self.nranks or displs.size != self.nranks:
+                raise NcclInvalid(f"{label} must be 1D arrays, got counts:{counts.ndim} and displs:{displs.ndim}")
+            expected = self.nranks * self.nranks
+            if counts.size != expected or displs.size != expected:
                 raise NcclInvalid(
-                    f"{label} must have length {self.nranks} or {self.nranks * self.nranks}, "
-                    f"got {counts.size} and {displs.size}"
+                    f"{label} must have length {expected}, got counts:{counts.size} and displs:{displs.size}"
                 )
-            return counts, displs, counts, displs
+            counts_mat = counts.reshape(self.nranks, self.nranks)
+            displs_mat = displs.reshape(self.nranks, self.nranks)
+            return counts, displs, counts_mat[self.rank], displs_mat[self.rank]
 
         sendcounts_arr, sdispls_arr, sendcounts_row, sdispls_row = _parse_counts_displs(
             sendcounts_arr, sdispls_arr, "sendcounts and sdispls"
