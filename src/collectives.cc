@@ -9,6 +9,7 @@
 #include "enqueue.h"
 #include "nccl.h"
 #include "nvtx_payload_schemas.h"
+#include <stdio.h> // todo, just for test, need to remove in future
 
 const char* ncclFuncToString(ncclFunc_t fn) {
   switch (fn) {
@@ -105,6 +106,26 @@ ncclResult_t ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
     sendbuff, recvbuff, count, datatype, ncclSum, 0, comm, stream, /* Args */
     ALLTOALL_CHUNKSTEPS, ALLTOALL_SLICESTEPS };
   return ncclEnqueueCheck(&info);
+}
+
+NCCL_API(ncclResult_t, ncclAlltoAllv, const void* sendbuff, const size_t* sendcounts,
+    const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
+    const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
+    const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
+    const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
+  (void)sendbuff;
+  (void)sendcounts;
+  (void)sdispls;
+  (void)recvbuff;
+  (void)recvcounts;
+  (void)rdispls;
+  (void)relaybuff;
+  (void)datatype;
+  (void)comm;
+  (void)stream;
+  fprintf(stderr, "ncclAlltoAllv called\n");
+  return ncclSuccess;
 }
 
 NCCL_API(ncclResult_t, ncclAllReduce, const void* sendbuff, void* recvbuff, size_t count,

@@ -813,6 +813,12 @@ cpdef allto_all(intptr_t sendbuff, intptr_t recvbuff, size_t count, int datatype
     check_status(__status__)
 
 
+cpdef allto_allv(intptr_t sendbuff, intptr_t sendcounts, intptr_t sdispls, intptr_t recvbuff, intptr_t recvcounts, intptr_t rdispls, intptr_t relaybuff, int datatype, intptr_t comm, intptr_t stream):
+    with nogil:
+        __status__ = ncclAlltoAllv(<const void*>sendbuff, <const size_t*>sendcounts, <const size_t*>sdispls, <void*>recvbuff, <const size_t*>recvcounts, <const size_t*>rdispls, <const void*>relaybuff, <_DataType>datatype, <Comm>comm, <Stream>stream)
+    check_status(__status__)
+
+
 cpdef gather(intptr_t sendbuff, intptr_t recvbuff, size_t count, int datatype, int root, intptr_t comm, intptr_t stream):
     with nogil:
         __status__ = ncclGather(<const void*>sendbuff, <void*>recvbuff, count, <_DataType>datatype, root, <Comm>comm, <Stream>stream)

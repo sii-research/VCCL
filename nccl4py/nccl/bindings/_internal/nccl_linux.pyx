@@ -90,6 +90,7 @@ cdef void* __ncclAllReduce = NULL
 cdef void* __ncclReduceScatter = NULL
 cdef void* __ncclAllGather = NULL
 cdef void* __ncclAlltoAll = NULL
+cdef void* __ncclAlltoAllv = NULL
 cdef void* __ncclGather = NULL
 cdef void* __ncclScatter = NULL
 cdef void* __ncclSend = NULL
@@ -346,6 +347,13 @@ cdef int _check_or_init_nccl() except -1 nogil:
                 handle = load_library()
             __ncclAlltoAll = dlsym(handle, 'ncclAlltoAll')
 
+        global __ncclAlltoAllv
+        __ncclAlltoAllv = dlsym(RTLD_DEFAULT, 'ncclAlltoAllv')
+        if __ncclAlltoAllv == NULL:
+            if handle == NULL:
+                handle = load_library()
+            __ncclAlltoAllv = dlsym(handle, 'ncclAlltoAllv')
+
         global __ncclGather
         __ncclGather = dlsym(RTLD_DEFAULT, 'ncclGather')
         if __ncclGather == NULL:
@@ -504,6 +512,9 @@ cpdef dict _inspect_function_pointers():
 
     global __ncclAlltoAll
     data["__ncclAlltoAll"] = <intptr_t>__ncclAlltoAll
+
+    global __ncclAlltoAllv
+    data["__ncclAlltoAllv"] = <intptr_t>__ncclAlltoAllv
 
     global __ncclGather
     data["__ncclGather"] = <intptr_t>__ncclGather
@@ -859,6 +870,16 @@ cdef ncclResult_t _ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t cou
             raise FunctionNotFoundError("function ncclAlltoAll is not found")
     return (<ncclResult_t (*)(const void*, void*, size_t, ncclDataType_t, ncclComm_t, cudaStream_t) noexcept nogil>__ncclAlltoAll)(
         sendbuff, recvbuff, count, datatype, comm, stream)
+
+
+cdef ncclResult_t _ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts, const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls, const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    global __ncclAlltoAllv
+    _check_or_init_nccl()
+    if __ncclAlltoAllv == NULL:
+        with gil:
+            raise FunctionNotFoundError("function ncclAlltoAllv is not found")
+    return (<ncclResult_t (*)(const void*, const size_t*, const size_t*, void*, const size_t*, const size_t*, const void*, ncclDataType_t, ncclComm_t, cudaStream_t) noexcept nogil>__ncclAlltoAllv)(
+        sendbuff, sendcounts, sdispls, recvbuff, recvcounts, rdispls, relaybuff, datatype, comm, stream)
 
 
 cdef ncclResult_t _ncclGather(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
