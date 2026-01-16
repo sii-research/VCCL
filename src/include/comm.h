@@ -350,7 +350,7 @@ struct ncclKernelPlan {
   struct ncclIntruQueue<struct ncclTaskBcast, &ncclTaskBcast::next> bcastTaskQueue;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueProxy;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueCe;
-  struct ncclIntruQueue<struct ncclTaskRmaColl, &ncclTaskRmaColl::next> rmaCollTaskQueue;
+  struct ncclIntruQueue<struct ncclRmaWorkBatch, &ncclRmaWorkBatch::next> rmaWorkBatchQueue;
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
   struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
 

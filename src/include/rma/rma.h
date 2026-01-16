@@ -40,7 +40,7 @@ ncclResult_t ncclRmaPut(struct ncclComm* comm, struct ncclKernelPlan* plan, cuda
 // below are for RMA collective operations
 // TODO: fill the contents!!
 struct ncclRmaCollArgs {
-  int ctx;
+  int nBatches;
   ncclFunc_t func;
 };
 
@@ -49,6 +49,7 @@ struct ncclRmaCollArgs {
 // All ncclTaskRma inside a work batch are executed in parallel if possible.
 // The ncclRmaWorkBatch of the same ncclTaskRmaColl run in serial.
 struct ncclRmaWorkBatch {
+  struct ncclRmaWorkBatch* next;
   int nProxyPut; // number of ncclTaskRma elements in proxyPutQueue
   int nProxyWaitSignal;
   int nCePut;
