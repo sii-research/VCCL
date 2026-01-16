@@ -491,6 +491,31 @@ ncclResult_t pncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 
 /*
+ * All-to-Allv
+ * 
+ * Each device sends variable amounts of data to all other devices and receives
+ * variable amounts of data from all other devices. 
+ *
+ * Parameters:
+ *   sendbuff:   - The source buffer containing data to be sent.
+ *   sendcounts  - Array of size 'nRanks * nRanks'. For current rank 'i' sending
+ *                 to rank 'j', the element count is sendcounts[i * nRanks + j]
+ *   sdispls     - Array of size 'nRanks * nRanks'. For current rank 'i' sending to
+ *                 rank 'j', the start index in sendbuff is sdispls[i * nRanks + j]
+ *   recvbuff    - The destination buffer.
+ *   recvcounts  - Array of size 'nRanks * nRanks'. For current rank 'i' receiving
+ *                 from rank 'j', the element count is: recvcounts[i * nRanks + j]
+ *   rdispls     - Array of size 'nRanks * nRanks'. For current rank 'i' receiving
+ *                 from rank 'j', the start index in recvbuff is: rdispls[i * nRanks + j]
+ *   relaybuff   - Optional intermediate buffer.
+ */
+ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
+    const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
+    const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t pncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
+    const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
+    const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+/*
  * Gather
  *
  * Each rank sends count elements from sendbuff to the root rank.
