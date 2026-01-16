@@ -1240,10 +1240,14 @@ class Communicator:
         Args:
             - sendbuf (NcclBufferSpec): Source buffer containing the concatenated send data.
             - recvbuf (NcclBufferSpec): Destination buffer for received data.
-            - sendcounts (Sequence[int]): Number of elements to send to each rank (length == nranks).
-            - sdispls (Sequence[int]): Element displacements in sendbuf for each rank (length == nranks).
-            - recvcounts (Sequence[int]): Number of elements expected from each rank (length == nranks).
-            - rdispls (Sequence[int]): Element displacements in recvbuf for each rank (length == nranks).
+            - sendcounts (Sequence[int]): Elements to send to each rank. Accepts length == nranks
+            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
+            - sdispls (Sequence[int]): Element displacements in sendbuf. Accepts length == nranks
+            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
+            - recvcounts (Sequence[int]): Elements expected from each rank. Accepts length == nranks
+            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
+            - rdispls (Sequence[int]): Element displacements in recvbuf. Accepts length == nranks
+            (per-rank row) or length == nranks*nranks / shape (nranks, nranks).
             - relaybuf (NcclBufferSpec | None): Optional relay buffer. Defaults to None.
             - stream (NcclStreamSpec, optional): CUDA stream for the operation. Defaults to None.
 
@@ -1273,28 +1277,48 @@ class Communicator:
         recvcounts_arr = _np.asarray(recvcounts, dtype=_np.int64)
         rdispls_arr = _np.asarray(rdispls, dtype=_np.int64)
 
-        if sendcounts_arr.ndim != 1 or sdispls_arr.ndim != 1:
-            raise NcclInvalid("sendcounts and sdispls must be 1D sequences")
-        if recvcounts_arr.ndim != 1 or rdispls_arr.ndim != 1:
-            raise NcclInvalid("recvcounts and rdispls must be 1D sequences")
-        if sendcounts_arr.size != self.nranks or sdispls_arr.size != self.nranks:
-            raise NcclInvalid(
-                f"sendcounts and sdispls must have length {self.nranks}, "
-                f"got {sendcounts_arr.size} and {sdispls_arr.size}"
-            )
-        if recvcounts_arr.size != self.nranks or rdispls_arr.size != self.nranks:
-            raise NcclInvalid(
-                f"recvcounts and rdispls must have length {self.nranks}, "
-                f"got {recvcounts_arr.size} and {rdispls_arr.size}"
-            )
+        def _parse_counts_displs(counts, displs, label):
+            if counts.ndim == 2 or displs.ndim == 2:
+                if counts.shape != (self.nranks, self.nranks) or displs.shape != (
+                    self.nranks,
+                    self.nranks,
+                ):
+                    raise NcclInvalid(
+                        f"{label} must have shape ({self.nranks}, {self.nranks})"
+                    )
+                counts_row = counts[self.rank]
+                displs_row = displs[self.rank]
+                return counts.reshape(-1), displs.reshape(-1), counts_row, displs_row
+
+            if counts.ndim != 1 or displs.ndim != 1:
+                raise NcclInvalid(f"{label} must be 1D or 2D arrays")
+
+            if counts.size == self.nranks * self.nranks and displs.size == self.nranks * self.nranks:
+                counts_mat = counts.reshape(self.nranks, self.nranks)
+                displs_mat = displs.reshape(self.nranks, self.nranks)
+                return counts, displs, counts_mat[self.rank], displs_mat[self.rank]
+
+            if counts.size != self.nranks or displs.size != self.nranks:
+                raise NcclInvalid(
+                    f"{label} must have length {self.nranks} or {self.nranks * self.nranks}, "
+                    f"got {counts.size} and {displs.size}"
+                )
+            return counts, displs, counts, displs
+
+        sendcounts_arr, sdispls_arr, sendcounts_row, sdispls_row = _parse_counts_displs(
+            sendcounts_arr, sdispls_arr, "sendcounts and sdispls"
+        )
+        recvcounts_arr, rdispls_arr, recvcounts_row, rdispls_row = _parse_counts_displs(
+            recvcounts_arr, rdispls_arr, "recvcounts and rdispls"
+        )
 
         if (sendcounts_arr < 0).any() or (sdispls_arr < 0).any():
             raise NcclInvalid("sendcounts and sdispls must be non-negative")
         if (recvcounts_arr < 0).any() or (rdispls_arr < 0).any():
             raise NcclInvalid("recvcounts and rdispls must be non-negative")
 
-        send_total = int(sendcounts_arr.sum())
-        recv_total = int(recvcounts_arr.sum())
+        send_total = int(sendcounts_row.sum())
+        recv_total = int(recvcounts_row.sum())
         if s.count < send_total:
             raise NcclInvalid(
                 f"Buffer count mismatch: sendbuf must have at least {send_total} elements, got {s.count}"
@@ -1304,9 +1328,9 @@ class Communicator:
                 f"Buffer count mismatch: recvbuf must have at least {recv_total} elements, got {r.count}"
             )
 
-        if (sdispls_arr + sendcounts_arr).max() > s.count:
+        if (sdispls_row + sendcounts_row).max() > s.count:
             raise NcclInvalid("sendcounts/sdispls exceed sendbuf bounds")
-        if (rdispls_arr + recvcounts_arr).max() > r.count:
+        if (rdispls_row + recvcounts_row).max() > r.count:
             raise NcclInvalid("recvcounts/rdispls exceed recvbuf bounds")
 
         s_counts = _np.ascontiguousarray(sendcounts_arr, dtype=_np.uintp)

@@ -489,16 +489,28 @@ ncclResult_t  ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t pncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-
+    * Parameters:
+    *   localbuff    - Local source buffer containing data to be transferred
+    *   count        - Number of elements to transfer
+    *   datatype     - NCCL data type of each element
 /*
  * All-to-Allv
  * 
  * Each device sends variable amounts of data to all other devices and receives
  * variable amounts of data from all other devices. 
- * Data to send to destination rank j is taken from sendbuff + sdispls[j] 
- * and has sendcounts[j] elements.
- * Data received from source rank i is placed at recvbuff + rdispls[i]
- * and has recvcounts[i] elements.
+ *
+ * Parameters:
+ *   sendbuff:   - The source buffer containing data to be sent.
+ *   sendcounts  - Array of size 'nRanks * nRanks'. For current rank 'i' sending
+ *                 to rank 'j', the element count is sendcounts[i * nRanks + j]
+ *   sdispls     - Array of size 'nRanks * nRanks'. For current rank 'i' sending to
+ *                 rank 'j', the start index in sendbuff is sdispls[i * nRanks + j]
+ *   recvbuff    - The destination buffer.
+ *   recvcounts  - Array of size 'nRanks * nRanks'. For current rank 'i' receiving
+ *                 from rank 'j', the element count is: recvcounts[i * nRanks + j]
+ *   rdispls     - Array of size 'nRanks * nRanks'. For current rank 'i' receiving
+ *                 from rank 'j', the start index in recvbuff is: rdispls[i * nRanks + j]
+ *   relaybuff   - Optional intermediate buffer.
  */
 ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
     const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
