@@ -46,7 +46,7 @@ struct timer_log{
   int sendWrCounter;
   int devIndex;
   int remainWrDataSize;
-  int bandwidths;
+  int bandwidth;
 };
 
 // define the size of windowsSize
@@ -321,7 +321,7 @@ struct timer_log_queue{
   }
 
   int getBandWidths(int devIndex) {
-    if (slideWindow[devIndex].size() <= 1) {
+    if (slideWindow[devIndex].size() < maxWindowSize) {
       return 0;
     }
 

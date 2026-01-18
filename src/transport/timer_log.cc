@@ -9,6 +9,9 @@
 #include <iomanip>
 #include <sstream>
 #include <queue>
+#include <deque>
+#include <thread>
+#include <chrono>
 
 const int nccl_telemetry_enable = ncclGetEnv("NCCL_TELEMETRY_ENABLE") ? atoi(ncclGetEnv("NCCL_TELEMETRY_ENABLE")) : 0;
 const char* nccl_telemetry_log_path = ncclGetEnv("NCCL_TELEMETRY_LOG_PATH");
@@ -62,15 +65,15 @@ struct TelemetryBandwidthInfo {
   int meanBandwidths[ncclNumFuncs][2];
   int bandwidthCounts[ncclNumFuncs][2];
   // Used for trace previous pinpointDuration logs
-  std::queue<timer_log> previousLogs[2];
+  std::deque<uint64_t> previousLogs[2];
 };
 
 // Used for pinpoint network abnormalities
+static TelemetryBandwidthInfo previousTelemetryBandwidthInfo;
 static TelemetryBandwidthInfo telemetryBandwidthInfo;
 static int pinpointDuration = 100 * 1000 * 1000; // 100 ms
 // static int previousMeanBandwidths[ncclNumFuncs][2] = {0};
 static bool occurAbnormal[2] = {false};
-static unsigned long long lastAbnormalTime[2] = {0};
 static int normalPreviousBandwidths[ncclNumFuncs][2] = {0};
 
 // Used for trace average network bandwidths every traceDuration
@@ -132,6 +135,8 @@ void* timerLogService(void *args){
 
         __sync_synchronize();
         if(global_timer_log.log.empty()){
+          // if log empty, sleep 100 microseconds
+          std::this_thread::sleep_for(std::chrono::microseconds(100));
           continue;
         }
 
@@ -242,93 +247,126 @@ void* timerLogService(void *args){
             logFilesStartTime = log.diff;
           }
           int bandWidths = global_timer_log.getBandWidths(log.devIndex);
+          if (bandWidths == 0) {
+            continue;
+          }
           log.bandwidth = bandWidths;
           unsigned long long current_timestamp = log.diff;
-
           bool iflog = false;
-          // First, pinpoint network abnormalities, if find bandwidth drop too much, output immediately
+
+          // First, if previousTelemetryBandwidthInfo doesn't have enough data for the first pinpointDuration, just fill it
+          if (previousTelemetryBandwidthInfo.startTime == 0) {
+            previousTelemetryBandwidthInfo.startTime = current_timestamp;
+            previousTelemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex] = bandWidths;
+            previousTelemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] = bandWidths;
+            previousTelemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex] = 1;
+            previousTelemetryBandwidthInfo.previousLogs[log.devIndex] = std::deque<uint64_t>();
+            previousTelemetryBandwidthInfo.previousLogs[log.devIndex].push_back(compress_func(log.diff, bandWidths, 0));
+          }
+          else if (current_timestamp - previousTelemetryBandwidthInfo.startTime < pinpointDuration) {
+            if (bandWidths > previousTelemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex]) {
+              previousTelemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex] = bandWidths;
+            }
+            previousTelemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] += bandWidths;
+            previousTelemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex] += 1;
+            previousTelemetryBandwidthInfo.previousLogs[log.devIndex].push_back(compress_func(log.diff, bandWidths, 0));
+          }
+          // Second, pinpoint network abnormalities, if find bandwidth drop too much, output immediately
           // Additionally, if we find bandwidth up again, we also output the logs
-          if (telemetryBandwidthInfo.startTime == 0) {
+          else if (telemetryBandwidthInfo.startTime == 0) {
             telemetryBandwidthInfo.startTime = current_timestamp;
             telemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex] = bandWidths;
             telemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] = bandWidths;
             telemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex] = 1;
-            telemetryBandwidthInfo.previousLogs[log.devIndex] = std::queue<timer_log>();
-            telemetryBandwidthInfo.previousLogs[log.devIndex].push(log);
+            telemetryBandwidthInfo.previousLogs[log.devIndex] = std::deque<uint64_t>();
+            telemetryBandwidthInfo.previousLogs[log.devIndex].push_back(compress_func(log.diff, bandWidths, 0));
           }
           else {
             if (bandWidths > telemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex]) {
               telemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex] = bandWidths;
             }
-            int meanBandwidth = telemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] /
-                                telemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex];
             telemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] += bandWidths;
             telemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex] += 1;
-            telemetryBandwidthInfo.previousLogs[log.devIndex].push(log);
+            telemetryBandwidthInfo.previousLogs[log.devIndex].push_back(compress_func(log.diff, bandWidths, 0));
 
             // 1. judge if maintain logs exceeds pinpointDuration
+            // if yes, pop front logs until within pinpointDuration and push into previousTelemetryBandwidthInfo
+            unsigned long long lastFrontTimestamp = 0;
             while (!telemetryBandwidthInfo.previousLogs[log.devIndex].empty()) {
-              timer_log &frontLog = telemetryBandwidthInfo.previousLogs[log.devIndex].front();
-              if (current_timestamp - frontLog.diff > pinpointDuration) {
-                telemetryBandwidthInfo.previousLogs[log.devIndex].pop();
-                telemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] -= frontLog.bandwidth;
+              uint64_t frontCompressedLog = telemetryBandwidthInfo.previousLogs[log.devIndex].front();
+              // Decompress timestamp and bandwidth
+              uint64_t frontTimestamp = frontCompressedLog & TIME_MASK;
+              int frontBandwidth = (frontCompressedLog >> TIME_BITS) & BANDWIDTH_MASK;
+              if (current_timestamp - BASETIME - frontTimestamp > pinpointDuration) {
+                telemetryBandwidthInfo.previousLogs[log.devIndex].pop_front();
+                telemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] -= frontBandwidth;
                 telemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex] -= 1;
+                lastFrontTimestamp = frontTimestamp;
+
+                // Also push into previousTelemetryBandwidthInfo
+                previousTelemetryBandwidthInfo.previousLogs[log.devIndex].push_back(frontCompressedLog);
+                if (frontBandwidth > previousTelemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex]) {
+                  previousTelemetryBandwidthInfo.maxBandwidths[log.func][log.devIndex] = frontBandwidth;
+                }
+                previousTelemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] += frontBandwidth;
+                previousTelemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex] += 1;
               } else {
                 break;
               }
             }
             telemetryBandwidthInfo.startTime = telemetryBandwidthInfo.previousLogs[log.devIndex].empty() ?
-                                               0 : telemetryBandwidthInfo.previousLogs[log.devIndex].front().diff;
-            
-            
-            // 2. Output after 100ms log after abnormality, if new shift happens, update the last abnormal time
-            if (current_timestamp - lastAbnormalTime[log.devIndex] <= pinpointDuration) {
-              // output current log
-              PortLogs &portLogs = logFilesMap[log.devIndex];
-              pFile = &portLogs.files[portLogs.currentFile];
+                                               0 : (telemetryBandwidthInfo.previousLogs[log.devIndex].front() & TIME_MASK) + BASETIME;
 
-              if (bandWidths < normalPreviousBandwidths[log.func][log.devIndex] / 2) {
-                uint64_t compress_log = compress_func(current_timestamp, bandWidths, 1);
-                (*pFile) << compress_log << std::endl;
-                if (!occurAbnormal[log.devIndex]) {
-                  // Detect abnormality
-                  occurAbnormal[log.devIndex] = true;
-                  lastAbnormalTime[log.devIndex] = log.diff;
-                }
-              } else {
-                uint64_t compress_log = compress_func(current_timestamp, bandWidths, 0);
-                (*pFile) << compress_log << std::endl;
-                if (occurAbnormal[log.devIndex]) {
-                  // Detect recovery
-                  occurAbnormal[log.devIndex] = false;
-                  lastAbnormalTime[log.devIndex] = log.diff;
+            // 2. judge if need to pop logs from previousTelemetryBandwidthInfo
+            if (lastFrontTimestamp > 0) {
+              while (!previousTelemetryBandwidthInfo.previousLogs[log.devIndex].empty()) {
+                uint64_t frontCompressedLog = previousTelemetryBandwidthInfo.previousLogs[log.devIndex].front();
+                uint64_t frontTimestamp = frontCompressedLog & TIME_MASK;
+                int frontBandwidth = (frontCompressedLog >> TIME_BITS) & BANDWIDTH_MASK;
+                if (frontTimestamp + BASETIME <= lastFrontTimestamp - pinpointDuration) {
+                  previousTelemetryBandwidthInfo.previousLogs[log.devIndex].pop_front();
+                  previousTelemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] -= frontBandwidth;
+                  previousTelemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex] -= 1;
+                } else {
+                  break;
                 }
               }
-              iflog = true;
             }
-            // 3. judge if need to output logs
+
+            // 3. calculate mean bandwidth
+            int meanBandwidth = telemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] /
+                                telemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex];
+            int previousMeanBandwidth = previousTelemetryBandwidthInfo.meanBandwidths[log.func][log.devIndex] /
+                                        previousTelemetryBandwidthInfo.bandwidthCounts[log.func][log.devIndex];
+
+            // 4. judge if need to output logs
             // output condition: bandwidth drop to half of mean bandwidth
-            else if (!occurAbnormal[log.devIndex] && bandWidths < meanBandwidth / 2) {
+            if (!occurAbnormal[log.devIndex] && meanBandwidth < previousMeanBandwidth / 2) {
               // output all maintained logs
               // exception
               PortLogs &portLogs = logFilesMap[log.devIndex];
               pFile = &portLogs.files[portLogs.currentFile];
 
-              unsigned long long lastLogTimestamp = lastAbnormalTime[log.devIndex] + pinpointDuration;
-              std::queue<timer_log> tempQueue(telemetryBandwidthInfo.previousLogs[log.devIndex]);
-              while (!tempQueue.empty()) {
-                timer_log frontLog = tempQueue.front();
-                tempQueue.pop();
-                if (frontLog.diff > lastLogTimestamp) {
-                  uint64_t compressLogs = compress_func(frontLog.diff, frontLog.bandwidth, 0);
-                  (*pFile) << compressLogs << std::endl;
+              // Output both previousTelemetryBandwidthInfo and telemetryBandwidthInfo logs within pinpointDuration
+              for (const auto& compressedLog : previousTelemetryBandwidthInfo.previousLogs[log.devIndex]) {
+                uint64_t frontTimestamp = compressedLog & TIME_MASK;
+                if (current_timestamp - BASETIME - frontTimestamp <= pinpointDuration) {
+                  uint64_t compressLogs = compress_func(frontTimestamp + BASETIME,
+                                                        (compressedLog >> TIME_BITS) & BANDWIDTH_MASK, 0);
+                  (*pFile) << compressLogs << "\n";
                 }
               }
-              
-              uint64_t compress_log = compress_func(current_timestamp, bandWidths, 1);
-              (*pFile) << compress_log << std::endl;
+
+              for (const auto& compressedLog : telemetryBandwidthInfo.previousLogs[log.devIndex]) {
+                uint64_t frontTimestamp = compressedLog & TIME_MASK;
+                if (current_timestamp - BASETIME - frontTimestamp <= pinpointDuration) {
+                  uint64_t compressLogs = compress_func(frontTimestamp + BASETIME,
+                                                        (compressedLog >> TIME_BITS) & BANDWIDTH_MASK, 1);
+                  (*pFile) << compressLogs << "\n";
+                }
+              }
+              pFile->flush();
               occurAbnormal[log.devIndex] = true;
-              lastAbnormalTime[log.devIndex] = current_timestamp;
 
               // Set normal previous bandwidths for recovering detection
               for (int f = 0; f < ncclNumFuncs; f++) {
@@ -339,33 +377,39 @@ void* timerLogService(void *args){
               }
               iflog = true;
             }
-            // 4. judge if need to output logs
+            // 5. judge if need to output logs
             // output condition: bandwidth recovers to normalPreviousBandwidths
-            else if (occurAbnormal[log.devIndex] && bandWidths >= normalPreviousBandwidths[log.func][log.devIndex] / 2) {
+            else if (occurAbnormal[log.devIndex] && meanBandwidth >= normalPreviousBandwidths[log.func][log.devIndex] * 3 /4) {
               // output current log
               PortLogs &portLogs = logFilesMap[log.devIndex];
               pFile = &portLogs.files[portLogs.currentFile];
               
-              unsigned long long lastLogTimestamp = lastAbnormalTime[log.devIndex] + pinpointDuration;
-              std::queue<timer_log> tempQueue(telemetryBandwidthInfo.previousLogs[log.devIndex]);
-              while (!tempQueue.empty()) {
-                timer_log frontLog = tempQueue.front();
-                tempQueue.pop();
-                if (frontLog.diff > lastLogTimestamp) {
-                  uint64_t compressLogs = compress_func(frontLog.diff, frontLog.bandwidth, 0);
-                  (*pFile) << compressLogs << std::endl;
+              // Also output boths logs in previousTelemetryBandwidthInfo and telemetryBandwidthInfo
+              
+              for (const auto& compressedLog : previousTelemetryBandwidthInfo.previousLogs[log.devIndex]) {
+                uint64_t frontTimestamp = compressedLog & TIME_MASK;
+                if (current_timestamp - BASETIME - frontTimestamp <= pinpointDuration) {
+                  uint64_t compressLogs = compress_func(frontTimestamp + BASETIME,
+                                                        (compressedLog >> TIME_BITS) & BANDWIDTH_MASK, 1);
+                  (*pFile) << compressLogs << "\n";
                 }
               }
 
-              uint64_t compress_log = compress_func(current_timestamp, bandWidths, 0);
-              (*pFile) << compress_log << std::endl;
+              for (const auto& compressedLog : telemetryBandwidthInfo.previousLogs[log.devIndex]) {
+                uint64_t frontTimestamp = compressedLog & TIME_MASK;
+                if (current_timestamp - BASETIME - frontTimestamp <= pinpointDuration) {
+                  uint64_t compressLogs = compress_func(frontTimestamp + BASETIME,
+                                                        (compressedLog >> TIME_BITS) & BANDWIDTH_MASK, 0);
+                  (*pFile) << compressLogs << "\n";
+                }
+              }
+              pFile->flush();
               occurAbnormal[log.devIndex] = false;
-              lastAbnormalTime[log.devIndex] = current_timestamp;
               iflog = true;
             }
           }
 
-          // Second, trace average network bandwidths every traceDuration
+          // Third, trace average network bandwidths every traceDuration
           if (telemetryAverageBandwidthInfo.startTime == 0) {
             telemetryAverageBandwidthInfo.startTime = current_timestamp;
             telemetryAverageBandwidthInfo.meanBandwidths[log.func][log.devIndex] = bandWidths;
@@ -387,12 +431,20 @@ void* timerLogService(void *args){
                   uint64_t compress_log = compress_func(current_timestamp, avgBandwidth, occurAbnormal[devIndex] ? 1 : 0);
                   PortLogs &portLogs = logFilesMap[devIndex];
                   pFile = &portLogs.files[portLogs.currentFile];
-                  (*pFile) << compress_log << std::endl;
+                  (*pFile) << compress_log << "\n";
                   // Ensure each devIndex only output once
                   break;
                 }
               }
+              pFile->flush();
+              telemetryAverageBandwidthInfo.startTime = 0;
+              memset(telemetryAverageBandwidthInfo.meanBandwidths, 0, sizeof(telemetryAverageBandwidthInfo.meanBandwidths));
+              memset(telemetryAverageBandwidthInfo.bandwidthCounts, 0, sizeof(telemetryAverageBandwidthInfo.bandwidthCounts));
             }
+          }
+          else {
+            telemetryAverageBandwidthInfo.meanBandwidths[log.func][log.devIndex] += bandWidths;
+            telemetryAverageBandwidthInfo.bandwidthCounts[log.func][log.devIndex] += 1;
           }
         }
       }
