@@ -1,6 +1,4 @@
 #include "timer_log.h"
-#include "nccl.h"
-#include "core.h"
 #include <sys/un.h>
 #include <iostream>
 #include <fstream>
@@ -8,8 +6,6 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
-#include <queue>
-#include <deque>
 #include <thread>
 #include <chrono>
 #include <climits>
