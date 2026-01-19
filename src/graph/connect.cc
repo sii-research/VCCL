@@ -583,7 +583,6 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
   NCCLCHECKGOTO(ncclCalloc(&treeToChild1, nNodes*MAXCHANNELS), ret, fail);
   NCCLCHECKGOTO(ncclCalloc(&nvlsHeads, nNodes*MAXCHANNELS), ret, fail);
 
-/*
   // Alternate rings to avoid crossing rails
   if (graphs[NCCL_ALGO_RING]->crossNic == 2 && (nChannels % 2) == 0) {
     for (int r=0; r<comm->nRanks; r++) {
@@ -598,32 +597,20 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
       }
     }
   }
-*/
+
   for (int c=0; c<nChannels;c++) {
     for (int n=0; n<nNodes; n++) {
       int r = firstRanks[n];
-      if(n % 2 == 0) {
-          ringRecv[c*nNodes+n] = allTopoRanks[r]->ringRecv[c];
-          ringSend[c*nNodes+n] = allTopoRanks[r]->ringSend[c];
-      }
-      else {
-        ringRecv[c*nNodes+n] = allTopoRanks[r]->ringReverseRecv[c];
-        ringSend[c*nNodes+n] = allTopoRanks[r]->ringReverseSend[c];
-      }
+      ringRecv[c*nNodes+n] = allTopoRanks[r]->ringRecv[c];
+      ringSend[c*nNodes+n] = allTopoRanks[r]->ringSend[c];
       treeToParent[c*nNodes+n] = allTopoRanks[r]->treeToParent[c];
       treeToChild0[c*nNodes+n] = allTopoRanks[r]->treeToChild0[c];
       treeToChild1[c*nNodes+n] = allTopoRanks[r]->treeToChild1[c];
     }
     for (int r=0; r<nranks; r++) {
-        int node = comm->rankToNode[r];
-        if(node % 2 == 0) {
-            ringPrev[c*nranks+r] = allTopoRanks[r]->ringPrev[c];
-            ringNext[c*nranks+r] = allTopoRanks[r]->ringNext[c];
-        }
-        else {
-            ringPrev[c*nranks+r] = allTopoRanks[r]->ringReversePrev[c];
-            ringNext[c*nranks+r] = allTopoRanks[r]->ringReverseNext[c];
-        }
+      int node = comm->rankToNode[r];
+      ringPrev[c*nranks+r] = allTopoRanks[r]->ringPrev[c];
+      ringNext[c*nranks+r] = allTopoRanks[r]->ringNext[c];
     }
   }
 
