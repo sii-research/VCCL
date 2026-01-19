@@ -117,17 +117,6 @@ struct ncclTopoRanks {
   int ringSend[MAXCHANNELS];
   int ringPrev[MAXCHANNELS];
   int ringNext[MAXCHANNELS];
-  /*
-  * on the node with odd number id
-  * the order of the local ranks 
-  * should be reversed to keep the
-  * the 2 GPUs crossing 2 nodes have
-  * the same id.
-  */
-  int ringReverseRecv[MAXCHANNELS];
-  int ringReverseSend[MAXCHANNELS];
-  int ringReversePrev[MAXCHANNELS];
-  int ringReverseNext[MAXCHANNELS];
 
   int treeToParent[MAXCHANNELS];
   int treeToChild0[MAXCHANNELS];
