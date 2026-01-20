@@ -26,7 +26,6 @@ extern "C" __global__ void kernelFunc1(void* args) {
   //printf("kernelFunc1: proxyOpCount is now %d\n", syncCond->proxyOpCount);
 }
 
-//extern "C" __global__ void asyncLaunchKernel(cudaStream_t stream, void* args) {
 void asyncLaunchKernel(cudaStream_t stream, void* args) {
   //printf("asyncLaunchKernel: Launching kernelFunc1\n");
   kernelFunc1<<<1, 1, 0, stream>>>(args);

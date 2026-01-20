@@ -1304,7 +1304,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
       args->state = ncclProxyOpNone;
       //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
       __sync_synchronize();
-      __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_ACQ_CST);
+      __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_SEQ_CST);
     }
   }
   return ncclSuccess;
@@ -1606,7 +1606,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
       args->state = ncclProxyOpNone;
       //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
       __sync_synchronize();
-      __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_ACQ_CST);
+      __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_SEQ_CST);
       for (int s=0; s<args->nsubs; s++) {
         ncclProfilerStopProxyOpEvent(s, args);
       }

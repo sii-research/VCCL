@@ -1565,7 +1565,7 @@ ncclResult_t ncclLaunchKernelBefore_NoUncapturedCuda(struct ncclComm* comm, stru
 // NCCL uses the "Remote" Mem Sync domain by default
 NCCL_PARAM(MemSyncDomain, "MEM_SYNC_DOMAIN", cudaLaunchMemSyncDomainRemote);
 #endif
-
+/*
 // Callback to synchronize with host proxy progress.
 static void CUDART_CB hostProxySyncCallback(void *args) {
   NVTX3_FUNC_RANGE_IN(nccl_domain);
@@ -1578,7 +1578,7 @@ static void CUDART_CB hostProxySyncCallback(void *args) {
   delete syncCond; // Free the sync condition
   return;
 }
-
+*/
 ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   ncclResult_t ret = ncclSuccess;
   struct ncclKernelPlanner* planner = &comm->planner;
