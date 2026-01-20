@@ -294,6 +294,37 @@ struct ncclTaskRma {
   uint8_t nChannels;
 };
 
+// TODO: fill the contents!!
+struct ncclTaskRmaColl {
+  struct ncclTaskRmaColl* next;
+  ncclFunc_t func;
+  size_t count;
+  ncclDataType_t datatype;
+  size_t bytes;
+
+  // Profiler plugin
+  int eActivationMask;
+  void* groupApiEventHandle;
+  void* collApiEventHandle;
+  void* eventHandle;
+};
+
+// A RMA work batch is a batch of RMA operations that are executed in full parallelism.
+// A ncclTaskRmaColl will be split into multiple work batches if there are too many RMA operations to fit into one batch.
+// All ncclTaskRma inside a work batch are executed in parallel if possible.
+// The ncclRmaWorkBatch of the same ncclTaskRmaColl run in serial.
+struct ncclRmaWorkBatch {
+  struct ncclRmaWorkBatch* next;
+  int nProxyPut; // number of ncclTaskRma elements in proxyPutQueue
+  int nProxyWaitSignal;
+  int nCePut;
+  int nCeWaitSignal;
+  struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> proxyPutQueue; // PutSignal & Signal Func
+  struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> proxyWaitSignalQueue;
+  struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> cePutQueue; // PutSignal & Signal Func
+  struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> ceWaitSignalQueue;
+};
+
 struct ncclKernelPlan {
   // A kernel plan is also a callback that reclaims itself. Hence this must
   // be the first member.
@@ -307,6 +338,7 @@ struct ncclKernelPlan {
   bool isSymColl;
   bool isCeColl;
   bool isRma;
+  bool isRmaColl;
   enum ncclDevWorkStorageType workStorageType;
   bool kernelSpecialized;
   void* kernelFn;
@@ -315,6 +347,7 @@ struct ncclKernelPlan {
     void* kernelSymArgs;
     struct ncclCeCollArgs* ceCollArgs;
     struct ncclRmaArgs* rmaArgs;
+    struct ncclRmaCollArgs* rmaCollArgs;
   };
   size_t kernelArgsSize;
   uint64_t channelMask; // bitset of which channels are present
@@ -333,6 +366,7 @@ struct ncclKernelPlan {
   struct ncclIntruQueue<struct ncclTaskBcast, &ncclTaskBcast::next> bcastTaskQueue;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueProxy;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueCe;
+  struct ncclIntruQueue<struct ncclRmaWorkBatch, &ncclRmaWorkBatch::next> rmaWorkBatchQueue;
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
   struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
 
@@ -429,7 +463,7 @@ struct ncclKernelPlanner {
   };
   struct ncclTaskCollSorter collSorter;
   struct Peer* peers/*[nRanks]*/;
-  int nTasksColl, nTasksP2p, nTasksBcast, nTasksRma;
+  int nTasksColl, nTasksP2p, nTasksBcast, nTasksRma, nTasksRmaColl;
   int nTasksP2pSend, nTasksP2pRecv;
 
   struct {
@@ -456,6 +490,7 @@ struct ncclKernelPlanner {
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collCeTaskQueue;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> *rmaTaskQueues; // Per-context queue for RMA tasks
+  struct ncclIntruQueue<struct ncclTaskRmaColl, &ncclTaskRmaColl::next> collRmaTaskQueue; // queue for RMA Collective tasks
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collSymTaskQueue;
   struct ncclIntruQueue<struct ncclWorkList, &ncclWorkList::next> collWorkQueue;
   struct ncclIntruQueue<struct ncclWorkList, &ncclWorkList::next> tmpCollWorkQueue;
@@ -727,6 +762,9 @@ struct ncclComm {
   // RMA state
   struct ncclRmaState rmaState;
   struct ncclIntruQueue<struct ncclRmaCeInitTask, &ncclRmaCeInitTask::next> rmaCeInitTaskQueue;
+
+  // RMA Collective state
+  struct ncclRmaCollState rmaCollState;
 
   // CE Collective
   struct ncclCeColl ceColl;

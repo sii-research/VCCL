@@ -72,7 +72,8 @@ typedef enum {
   ncclFuncPutSignal = 12,
   ncclFuncSignal = 13,
   ncclFuncWaitSignal = 14,
-  ncclNumFuncs = 15
+  ncclFuncAlltoAllV = 15,
+  ncclNumFuncs = 16
 } ncclFunc_t;
 
 
