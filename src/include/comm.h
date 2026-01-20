@@ -298,9 +298,25 @@ struct ncclTaskRma {
 struct ncclTaskRmaColl {
   struct ncclTaskRmaColl* next;
   ncclFunc_t func;
+  int ctx;
+  int round;
   size_t count;
   ncclDataType_t datatype;
   size_t bytes;
+
+  void const* srcBuff;
+  size_t srcWinOffset;
+  struct ncclDevrWindow* srcWinHost;
+
+  int peer;
+  size_t peerWinOffset;
+  struct ncclDevrWindow* peerWinHost;
+
+  // Signal operations
+  ncclSignalMode_t signalMode;
+  int* peers;
+  int* nsignals;
+  int npeers;
 
   // Profiler plugin
   int eActivationMask;
@@ -706,6 +722,7 @@ struct ncclComm {
   struct ncclMemoryPool memPool_ncclTaskColl;
   struct ncclMemoryPool memPool_ncclTaskP2p;
   struct ncclMemoryPool memPool_ncclTaskRma;
+  struct ncclMemoryPool memPool_ncclTaskRmaColl;
   struct ncclMemoryPool memPool_ncclProxyOp;
   struct ncclMemoryPool memPool_ncclKernelPlan;
   struct ncclMemoryPool memPool_ncclRmaProxyDesc;

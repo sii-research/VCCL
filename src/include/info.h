@@ -37,6 +37,12 @@ struct ncclInfo {
   // WaitSignal descriptors
   int nDesc;
   ncclWaitSignalDesc_t* signalDescs;
+  // AlltoAllv args
+  const size_t* sendcounts;
+  const size_t* sdispls;
+  const size_t* recvcounts;
+  const size_t* rdispls;
+  const void* relaybuff;
 };
 
 #endif
