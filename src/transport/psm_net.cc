@@ -1153,7 +1153,10 @@ static ncclResult_t recvProxyFree(struct ncclProxyConnection* connection, struct
 static_assert(PSM_NET_STEPS <= NCCL_NET_MAX_REQUESTS, "Not enough net requests to cover for steps");
 
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+  //if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+   __sync_synchronize();
+  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_ACQUIRE)) return ncclSuccess;
+
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
       struct ncclProxySubArgs* sub = args->subs+s;
@@ -1299,14 +1302,19 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
         ncclProfilerStopProxyOpEvent(s, args);
       }
       args->state = ncclProxyOpNone;
-      args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+      //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+      __sync_synchronize();
+      __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_ACQ_CST);
     }
   }
   return ncclSuccess;
 }
 
 static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+  //if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+  __sync_synchronize();
+  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_ACQUIRE)) return ncclSuccess;
+
   if (args->state == ncclProxyOpReady) {
     // Initialize subs and group them by same recvComm.
     void* recvComm = NULL;
@@ -1596,7 +1604,9 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
     }
     if (args->done == args->nsubs) {
       args->state = ncclProxyOpNone;
-      args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+      //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+      __sync_synchronize();
+      __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_ACQ_CST);
       for (int s=0; s<args->nsubs; s++) {
         ncclProfilerStopProxyOpEvent(s, args);
       }

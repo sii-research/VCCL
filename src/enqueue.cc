@@ -13,6 +13,7 @@
 #include "cudawrap.h"
 #include "profiler.h"
 #include "transport.h"
+#include "device/sync_kernel.h"
 
 #include <cstring> // std::memcpy
 #include <cinttypes> // PRIx64
@@ -251,7 +252,8 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   }
 
   if (ncclParamPassSm()) {
-    plan->syncCondition = new psmSyncCondition;
+    cudaMallocHost((void**)&plan->syncCondition, sizeof(psmSyncCondition));
+    memset(plan->syncCondition, 0, sizeof(psmSyncCondition));
     plan->syncCondition->proxyReadyEvent = 0;
     plan->syncCondition->proxyOpCount= proxyOpCnt;
   }
@@ -1405,6 +1407,10 @@ static ncclResult_t reclaimPlan(struct ncclComm* comm, struct ncclCommCallback* 
     ncclMemoryPoolFree(&comm->memPool_ncclPsmSelfCopy, node);
     node = next;
   }
+  // Free psmCondition
+  if (plan->syncCondition) {
+    cudaFreeHost(plan->syncCondition);
+  }
   // Free plan struct
   ncclMemoryPoolFree(&comm->memPool_ncclKernelPlan, plan);
   return ncclSuccess;
@@ -1594,7 +1600,8 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
       CUDACHECKGOTO(cudaMemcpyAsync(node->dst, node->src, node->bytes, cudaMemcpyDeviceToDevice, launchStream), ret, do_return);
       node = node->next;
     }
-    CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
+    //CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
+    asyncLaunchKernel(launchStream, plan->syncCondition);
     goto do_return;
   }
   int driverVersion;
