@@ -827,8 +827,8 @@ static void computeChunksize(struct ncclProxySubArgs* sub) {
 
 static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   //if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
-  __sync_synchronize();
   if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_ACQUIRE)) return ncclSuccess;
+  //__sync_synchronize();
 
   if (args->reg) {
     if (args->state == ncclProxyOpReady) {
@@ -964,8 +964,8 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
 
 static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   //if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
-  __sync_synchronize();
   if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_ACQUIRE)) return ncclSuccess;
+  //__sync_synchronize();
 
   if (args->reg) {
     if (args->state == ncclProxyOpReady) {
