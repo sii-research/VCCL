@@ -2,7 +2,7 @@
  * Copyright (c) 2017-2022, NVIDIA CORPORATION. All rights reserved.
  *
  * See LICENSE.txt for license information
- ************************************************************************/
+************************************************************************/
 
 #include "enqueue.h"
 #include "argcheck.h"
@@ -1512,7 +1512,8 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
   if (planner->nTasksColl + planner->nTasksP2p + planner->nTasksBcast != 0 ||
       !ncclIntruQueueEmpty(&planner->collSymTaskQueue) ||
       !ncclIntruQueueEmpty(&planner->collCeTaskQueue) ||
-      planner->nTasksRma != 0) {
+      planner->nTasksRma != 0 ||
+      planner->nTasksRmaColl != 0) {
     do {
       memset(&planner->wipPlan, 0, sizeof(planner->wipPlan));
 
@@ -1527,6 +1528,12 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
       if (planner->nTasksRma != 0) {
         NCCLCHECKGOTO(scheduleRmaTasksToPlan(comm, plan), result, failure);
         if (plan->isRma && plan->rmaArgs != NULL && plan->rmaArgs->nRmaTasks > 0) {
+          ncclIntruQueueEnqueue(&planner->planQueue, plan);
+          nPlans += 1;
+        }
+      } else if (planner->nTasksRmaColl != 0) {
+        NCCLCHECKGOTO(scheduleRmaCollTasksToPlan(comm, plan), result, failure);
+        if (plan->isRmaColl && plan->rmaCollArgs != NULL && plan->rmaCollArgs->nBatches > 0) {
           ncclIntruQueueEnqueue(&planner->planQueue, plan);
           nPlans += 1;
         }
@@ -1590,7 +1597,8 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
     } while (planner->nTasksColl + planner->nTasksP2p + planner->nTasksBcast != 0 ||
              !ncclIntruQueueEmpty(&planner->collSymTaskQueue) ||
              !ncclIntruQueueEmpty(&planner->collCeTaskQueue) ||
-             planner->nTasksRma != 0);
+             planner->nTasksRma != 0 ||
+             planner->nTasksRmaColl != 0);
 
     struct ncclKernelPlan* planHead = ncclIntruQueueHead(&planner->planQueue);
     planner->unlaunchedPlansHead = planHead;
@@ -2924,80 +2932,84 @@ ncclResult_t rmaCollTaskAppend(
 
   // Enqueue PutSignal tasks for each peer
   const size_t chunkSize = 1ULL << 30; // 1GB
-  for (int round = 0; round < nranks; round++) {
-    int peer = comm->p2pSchedule[round].sendRank;
-    size_t sendCount = info->sendcounts[rank * nranks + peer];
-    if (sendCount == 0) continue;
+  for (int peer = 0; peer < nranks; peer++) {
+    bool isSameNode = comm->rankToNode[rank] == comm->rankToNode[peer];
+    bool isSameLocalRank = comm->rankToLocalRank[rank] == comm->rankToLocalRank[peer];
+    bool needsRelay = !isSameLocalRank && !isSameNode;
+    if (info->sendcounts[rank * nranks + peer]) {
+      size_t sdisp = info->sdispls[rank * nranks + peer];
+      size_t rdisp = info->rdispls[peer * nranks + rank];
+      const char* srcBase = (const char*)info->sendbuff + sdisp * eltSize;
+      size_t srcWinOffset = (char*)srcBase - (char*)srcWinHost->userPtr;
+      size_t peerWinOffset = rdisp * eltSize;
+      size_t totalBytes = info->sendcounts[rank * nranks + peer] * eltSize;
+      int numChunks = (totalBytes + chunkSize - 1) / chunkSize;
+      for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+        size_t chunkBytes = (chunkIdx == numChunks - 1)
+                            ? (totalBytes - chunkIdx * chunkSize)
+                            : chunkSize;
+        size_t chunkOffset = chunkIdx * chunkSize;
+        struct ncclTaskRmaColl* t = ncclMemoryPoolAlloc<struct ncclTaskRmaColl>(&comm->memPool_ncclTaskRmaColl, &comm->memPermanent);
+        t->func = ncclFuncPutSignal;
+        t->ctx = 0;
+        t->round = -1; // Will be set in schedule phase
+        t->count = chunkBytes / eltSize;
+        t->datatype = info->datatype;
+        t->bytes = chunkBytes;
+        t->srcBuff = srcBase + chunkOffset;
+        t->srcWinOffset = srcWinOffset + chunkOffset;
+        t->srcWinHost = srcWinHost;
+        t->peer = peer;
+        t->peerWinOffset = peerWinOffset + chunkOffset;
+        t->peerWinHost = recvWinHost;
+        t->relayBuff = needsRelay ? relayWinHost : NULL;
+        t->signalMode = (chunkIdx == numChunks - 1) ? NCCL_SIGNAL : NCCL_SIGNAL_NONE;
+        t->peers = NULL;
+        t->nsignals = NULL;
+        t->npeers = 0;
+        t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
 
-    size_t sdisp = info->sdispls[rank * nranks + peer];
-    size_t rdisp = info->rdispls[peer * nranks + rank];
-
-    const char* srcBase = (const char*)info->sendbuff + sdisp * eltSize;
-    size_t srcWinOffset = (char*)srcBase - (char*)srcWinHost->userPtr;
-    size_t peerWinOffset = rdisp * eltSize;
-
-    size_t totalBytes = sendCount * eltSize;
-    int numChunks = (totalBytes + chunkSize - 1) / chunkSize;
-
-    for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
-      size_t chunkBytes = (chunkIdx == numChunks - 1)
-                          ? (totalBytes - chunkIdx * chunkSize)
-                          : chunkSize;
-      size_t chunkOffset = chunkIdx * chunkSize;
-
+        planner->nTasksRmaColl++;
+        ncclIntruQueueEnqueue(&planner->collRmaTaskQueue, t);
+      }
+    }
+    
+    if (info->recvcounts[rank * nranks + peer]) {
+      int waitPeer = peer;
+      if (needsRelay) {
+        // Example: rank0 (node0, localRank=0) receives from rank9 (node1, localRank=1)
+        //          rank9 sends to node0's rank1, then node0's rank1 sends to node0's rank0.
+        int peerLocalRank = comm->rankToLocalRank[peer];
+        int myNode = comm->rankToNode[rank];
+        waitPeer = comm->nodeRanks[myNode].localRankToRank[peerLocalRank];
+      }
+      
       struct ncclTaskRmaColl* t = ncclMemoryPoolAlloc<struct ncclTaskRmaColl>(&comm->memPool_ncclTaskRmaColl, &comm->memPermanent);
-      t->func = ncclFuncPutSignal;
+      t->func = ncclFuncWaitSignal;
       t->ctx = 0;
-      t->round = round;
-      t->count = chunkBytes / eltSize;
+      t->round = -1;
+      t->count = 0;
       t->datatype = info->datatype;
-      t->bytes = chunkBytes;
-      t->srcBuff = srcBase + chunkOffset;
-      t->srcWinOffset = srcWinOffset + chunkOffset;
-      t->srcWinHost = srcWinHost;
-      t->peer = peer;
-      t->peerWinOffset = peerWinOffset + chunkOffset;
-      t->peerWinHost = recvWinHost;
-      t->signalMode = (chunkIdx == numChunks - 1) ? NCCL_SIGNAL : NCCL_SIGNAL_NONE;
-      t->peers = NULL;
-      t->nsignals = NULL;
-      t->npeers = 0;
-      t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
+      t->bytes = 0;
+      t->srcBuff = NULL;
+      t->srcWinOffset = 0;
+      t->srcWinHost = NULL;
+      t->peer = peer; // Original sender (for reference)
+      t->peerWinOffset = 0;
+      t->peerWinHost = NULL;
+      t->relayBuff = NULL;
+      t->signalMode = NCCL_SIGNAL;
+      t->npeers = 1;
+      t->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
+      t->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
+      t->peers[0] = waitPeer; // Wait for relay rank if needed, otherwise original sender
+      t->nsignals[0] = 1;
 
+      t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
       planner->nTasksRmaColl++;
       ncclIntruQueueEnqueue(&planner->collRmaTaskQueue, t);
     }
   }
-
-  // Enqueue WaitSignal tasks in p2pSchedule round order
-  for (int round = 0; round < nranks; round++) {
-    int peer = comm->p2pSchedule[round].recvRank;
-    if (info->recvcounts[rank * nranks + peer] == 0) continue;
-    struct ncclTaskRmaColl* t = ncclMemoryPoolAlloc<struct ncclTaskRmaColl>(&comm->memPool_ncclTaskRmaColl, &comm->memPermanent);
-    t->func = ncclFuncWaitSignal;
-    t->ctx = 0;
-    t->round = round;
-    t->count = 0;
-    t->datatype = info->datatype;
-    t->bytes = 0;
-    t->srcBuff = NULL;
-    t->srcWinOffset = 0;
-    t->srcWinHost = NULL;
-    t->peer = 0;
-    t->peerWinOffset = 0;
-    t->peerWinHost = NULL;
-    t->signalMode = NCCL_SIGNAL;
-    t->npeers = 1;
-    t->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
-    t->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
-    t->peers[0] = peer;
-    t->nsignals[0] = 1;
-
-    t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
-    planner->nTasksRmaColl++;
-    ncclIntruQueueEnqueue(&planner->collRmaTaskQueue, t);
-  }
-
   return ncclSuccess;
 }
 

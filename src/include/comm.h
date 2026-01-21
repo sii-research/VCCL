@@ -312,6 +312,10 @@ struct ncclTaskRmaColl {
   size_t peerWinOffset;
   struct ncclDevrWindow* peerWinHost;
 
+  void const* relayBuff;
+  // size_t relayWinOffset;
+  // struct ncclDevrWindow* relayWinHost;
+
   // Signal operations
   ncclSignalMode_t signalMode;
   int* peers;
