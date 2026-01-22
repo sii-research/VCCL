@@ -1154,8 +1154,8 @@ static_assert(PSM_NET_STEPS <= NCCL_NET_MAX_REQUESTS, "Not enough net requests t
 
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   //if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
-  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_ACQUIRE)) return ncclSuccess;
-  //__sync_synchronize();
+  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_SEQ_CST)) return ncclSuccess;
+  __sync_synchronize();
 
   if (args->state == ncclProxyOpReady) {
     for (int s=0; s<args->nsubs; s++) {
@@ -1312,8 +1312,8 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
 
 static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
   //if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
-  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_ACQUIRE)) return ncclSuccess;
-  //__sync_synchronize();
+  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_SEQ_CST)) return ncclSuccess;
+  __sync_synchronize();
   if (args->state == ncclProxyOpReady) {
     // Initialize subs and group them by same recvComm.
     void* recvComm = NULL;
