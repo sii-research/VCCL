@@ -1408,9 +1408,12 @@ static ncclResult_t reclaimPlan(struct ncclComm* comm, struct ncclCommCallback* 
     node = next;
   }
   // Free psmCondition
+  // NOTE: delibrately to not free syncCondition to avoid hang.
+  /*
   if (plan->syncCondition) {
     cudaFreeHost(plan->syncCondition);
   }
+  */
   // Free plan struct
   ncclMemoryPoolFree(&comm->memPool_ncclKernelPlan, plan);
   return ncclSuccess;
