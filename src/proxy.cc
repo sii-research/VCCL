@@ -1850,9 +1850,9 @@ ncclResult_t ncclProxyCreate(struct ncclComm* comm) {
     proxyState->directMode = comm->directMode;
     memcpy(proxyState->buffSizes, comm->buffSizes, sizeof(comm->buffSizes));
 
-    if(TIMER_LOG_ENTRY){
-      global_timer_log.init();
-    }
+    // if(TIMER_LOG_ENTRY){
+      // global_timer_log.init();
+    // }
 
     PTHREADCHECK(pthread_create(&comm->proxyState->thread, NULL, ncclProxyService, comm->proxyState), "pthread_create");
     ncclSetThreadName(comm->proxyState->thread, "NCCL Service %2d", comm->cudaDev);
@@ -1910,9 +1910,9 @@ ncclResult_t ncclProxyStop(struct ncclComm* comm) {
 }
 
 ncclResult_t ncclProxyDestroy(struct ncclComm* comm) {
-  if(TIMER_LOG_ENTRY){
-    global_timer_log.destroy();
-  }
+  // if(TIMER_LOG_ENTRY){
+    // global_timer_log.destroy();
+  // }
   struct ncclProxyState* sharedProxyState = comm->sharedRes->proxyState;
 
   if (sharedProxyState) {

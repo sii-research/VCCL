@@ -221,7 +221,7 @@ static ncclResult_t sendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
 
   int proxyRank;
   int64_t netId;
-  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, peerInfo->rank, &netId, &req.netDev, nullptr, nullptr, &proxyRank));
+  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, peerInfo->rank, &netId, &req.netDev, &proxyRank));
   NCCLCHECK(ncclTopoCheckGdr(comm->topo, myInfo->rank, netId, 1, &req.useGdr));
   send->conn.flags |= req.useGdr ? NCCL_DIRECT_NIC : 0;
   if (!req.useGdr && connIndex == 0) comm->useGdr = 0;
@@ -264,7 +264,7 @@ static ncclResult_t recvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph
   // Use myInfo->rank as the receiver uses its own NIC
   int proxyRank;
   int64_t netId;
-  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, myInfo->rank, &netId, &req.netDev, nullptr, nullptr, &proxyRank));
+  NCCLCHECK(ncclTopoGetNetDev(comm, myInfo->rank, graph, channelId, myInfo->rank, &netId, &req.netDev, &proxyRank));
   NCCLCHECK(ncclTopoCheckGdr(comm->topo, myInfo->rank, netId, 0, &req.useGdr));
   recv->conn.flags |= req.useGdr ? NCCL_DIRECT_NIC : 0;
   if (!req.useGdr && connIndex == 0) comm->useGdr = 0;

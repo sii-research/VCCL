@@ -22,11 +22,6 @@ ncclResult_t ncclTopoPreset(struct ncclComm* comm, struct ncclTopoGraph** graphs
   int nChannels = comm->nChannels;
 
   topoRanks->nvlsHeadNum = 0;
-
-  // re-arrange the order of intra-node ranks
-  //int *ringIntra_all = graphs[NCCL_ALGO_RING]->intra;
-  //pointillism_ex(ringIntra_all, nChannels, localRanks);
-
   for (int c=0; c<nChannels; c++) {
     struct ncclChannel* channel = comm->channels+c;
     channel->ring.prev = channel->ring.next = -1;
@@ -393,7 +388,6 @@ ncclResult_t ncclTopoPostset(struct ncclComm* comm, int* firstRanks, int* treePa
   NCCLCHECKGOTO(ncclCalloc(&treeToChild0, nNodes*MAXCHANNELS), ret, fail);
   NCCLCHECKGOTO(ncclCalloc(&treeToChild1, nNodes*MAXCHANNELS), ret, fail);
   NCCLCHECKGOTO(ncclCalloc(&nvlsHeads, nNodes*MAXCHANNELS), ret, fail);
-
 
   // Alternate rings to avoid crossing rails
   if (graphs[NCCL_ALGO_RING]->crossNic == 2 && (nChannels % 2) == 0) {
