@@ -13,6 +13,7 @@
 #include "cudawrap.h"
 #include "profiler.h"
 #include "transport.h"
+#include "device/sync_kernel.h"
 
 #include <cstring> // std::memcpy
 #include <cinttypes> // PRIx64
@@ -251,7 +252,8 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   }
 
   if (ncclParamPassSm()) {
-    plan->syncCondition = new psmSyncCondition;
+    cudaMallocHost((void**)&plan->syncCondition, sizeof(psmSyncCondition));
+    memset(plan->syncCondition, 0, sizeof(psmSyncCondition));
     plan->syncCondition->proxyReadyEvent = 0;
     plan->syncCondition->proxyOpCount= proxyOpCnt;
   }
@@ -1405,6 +1407,13 @@ static ncclResult_t reclaimPlan(struct ncclComm* comm, struct ncclCommCallback* 
     ncclMemoryPoolFree(&comm->memPool_ncclPsmSelfCopy, node);
     node = next;
   }
+  // Free psmCondition
+  // NOTE: delibrately to not free syncCondition to avoid hang.
+  /*
+  if (plan->syncCondition) {
+    cudaFreeHost(plan->syncCondition);
+  }
+  */
   // Free plan struct
   ncclMemoryPoolFree(&comm->memPool_ncclKernelPlan, plan);
   return ncclSuccess;
@@ -1559,7 +1568,7 @@ ncclResult_t ncclLaunchKernelBefore_NoUncapturedCuda(struct ncclComm* comm, stru
 // NCCL uses the "Remote" Mem Sync domain by default
 NCCL_PARAM(MemSyncDomain, "MEM_SYNC_DOMAIN", cudaLaunchMemSyncDomainRemote);
 #endif
-
+/*
 // Callback to synchronize with host proxy progress.
 static void CUDART_CB hostProxySyncCallback(void *args) {
   NVTX3_FUNC_RANGE_IN(nccl_domain);
@@ -1572,7 +1581,7 @@ static void CUDART_CB hostProxySyncCallback(void *args) {
   delete syncCond; // Free the sync condition
   return;
 }
-
+*/
 ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   ncclResult_t ret = ncclSuccess;
   struct ncclKernelPlanner* planner = &comm->planner;
@@ -1594,7 +1603,8 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
       CUDACHECKGOTO(cudaMemcpyAsync(node->dst, node->src, node->bytes, cudaMemcpyDeviceToDevice, launchStream), ret, do_return);
       node = node->next;
     }
-    CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
+    //CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
+    asyncLaunchKernel(launchStream, plan->syncCondition);
     goto do_return;
   }
   int driverVersion;
