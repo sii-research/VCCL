@@ -90,6 +90,12 @@ struct cliqueInfo {
   int *ranks;
 };
 
+typedef enum {
+  NCCL_P2P_RDMA_READ = 0,
+  NCCL_P2P_RDMA_WRITE = 1,
+  NCCL_P2P_
+};
+
 struct ncclDestructor {
   struct ncclDestructor* next;
   void* obj;
@@ -299,29 +305,18 @@ struct ncclTaskRmaColl {
   struct ncclTaskRmaColl* next;
   ncclFunc_t func;
   int ctx;
-  int round;
-  size_t count;
+  
+  void const* sendBuff;
+  void const* recvBuff;
+  const size_t* sendcounts;
+  const size_t* sdispls;
+  const size_t* recvcounts;
+  const size_t* rdispls;
+  const void* relaybuff;
   ncclDataType_t datatype;
-  size_t bytes;
-
-  void const* srcBuff;
-  size_t srcWinOffset;
-  struct ncclDevrWindow* srcWinHost;
-
-  int peer;
-  size_t peerWinOffset;
-  struct ncclDevrWindow* peerWinHost;
-
-  void const* relayBuff;
-  // size_t relayWinOffset;
-  // struct ncclDevrWindow* relayWinHost;
-
-  // Signal operations
-  ncclSignalMode_t signalMode;
-  int* peers;
-  int* nsignals;
-  int npeers;
-
+  ncclComm_t comm;
+  cudaStream_t stream;
+  
   // Profiler plugin
   int eActivationMask;
   void* groupApiEventHandle;

@@ -128,6 +128,148 @@ fail:
   goto exit;
 }
 
+// Helper function to check if two ranks are on same rail (same local rank, different nodes)
+static inline bool isSameRail(struct ncclComm* comm, int rank1, int rank2) {
+  if (comm->rankToNode[rank1] == comm->rankToNode[rank2]) {
+    return false; // Same node, not inter-node
+  }
+  return comm->rankToLocalRank[rank1] == comm->rankToLocalRank[rank2];
+}
+
+// Helper to allocate and initialize a new RMA work batch
+static ncclResult_t allocRmaWorkBatch(struct ncclRmaWorkBatch** batchOut) {
+  struct ncclRmaWorkBatch* batch;
+  NCCLCHECK(ncclCalloc(&batch, 1));
+  batch->next = nullptr;
+  batch->nProxyPut = 0;
+  batch->nProxyWaitSignal = 0;
+  batch->nCePut = 0;
+  batch->nCeWaitSignal = 0;
+  *batchOut = batch;
+  return ncclSuccess;
+}
+
 ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
+  struct ncclKernelPlanner* planner = &comm->planner;
+  struct ncclTaskRmaColl* task = ncclIntruQueueDequeue(&planner->collRmaTaskQueue);
+
+  planner->isRmaColl = true;
+  plan->rmaCollArgs->func = task->func;
+  plan->rmaCollArgs->nBatches = 0;
+
+  int groupSize = comm->p2pSchedGroupSize;
+  int group = comm->localRank / groupSize;
+  int nGroups = comm->nRanks / groupSize;
+  int nGroupsPow2 = pow2Up(nGroups);
+  int rank = comm->rank;
+  const size_t eltSize = ncclTypeSize(task->datatype);
+  const size_t chunkSize = 1ULL << 30; // 1GB
+
+  if (task->func == ncclFuncAlltoAllV) {
+    // Collect valid groupRounds and their deltas
+    int* validGroupDeltas;
+    int nValidGroupRounds = 0;
+    int groupDelta = 1;
+
+    NCCLCHECK(ncclCalloc(&validGroupDeltas, nGroupsPow2));
+    int groupDelta = 1;
+    int nValidGroupRounds = 0;
+    for (int gr = 0; gr < nGroupsPow2; gr++) {
+      if (groupDelta < nGroups) {
+        validGroupDeltas[nValidGroupRounds++] = groupDelta;
+      }
+      groupDelta = (groupDelta + gr + 1) & (nGroupsPow2 - 1);
+    }
+
+    int nBatches = nValidGroupRounds;
+    struct ncclRmaWorkBatch** batches;
+    NCCLCHECK(ncclCalloc(&batches, nBatches));
+    for (int i = 0; i < nBatches; i++) {
+      NCCLCHECK(allocRmaWorkBatch(&batches[i]));
+    }
+
+    for (int batchIdx = 0; batchIdx < nBatches; batchIdx++) {
+      struct ncclRmaWorkBatch* curBatch = batches[batchIdx];
+      if (batchIdx == 0) {
+        for (int round = 0; round < comm->localRanks; round++) {
+          int sendRank = comm->p2pSchedule[round].sendRank;
+          int recvRank = comm->p2pSchedule[round].recvRank;
+          if (rank == sendRank) {
+            // selfcopy
+          }
+
+          size_t sendCount = task->sendcounts[rank * comm->nRanks + sendRank];
+          if (sendCount > 0) {
+            size_t sdisp = task->sdispls[rank * comm->nRanks + sendRank];
+            size_t rdisp = task->rdispls[sendRank * comm->nRanks + rank];
+            // TODO: Create ncclTaskRma and enqueue to curBatch->cePutQueue
+            // TODO: Create ncclTaskRma for signal and enqueue to curBatch->ceWaitSignalQueue
+            curBatch->nCePut++;
+            curBatch->nCeWaitSignal++;
+          }
+        }
+      } else {
+        // groupRound > 0: Phase 2 & 3 (intraNode cross-rail)
+        // This batch processes CE for groupRound[batchIdx]
+        int ceGroupDelta = validGroupDeltas[batchIdx];
+        int ceRecvNode = (group - ceGroupDelta + nGroups) % nGroups;
+        int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[comm->localRank];
+
+        // Phase 2: Data received at sameRail rank needs to be distributed locally
+        // Phase 3: Other local ranks gather data to send to this rank
+        for (int lr = 0; lr < comm->localRanks; lr++) {
+          int localPeerRank = comm->localRankToRank[lr];
+          if (localPeerRank == rank) continue; // skip self
+
+          // TODO: Create ncclTaskRma for phase 2 (local distribution from recvRankSameRail)
+          // TODO: Create ncclTaskRma for phase 3 (local gathering to rank)
+          // Enqueue to curBatch->cePutQueue and curBatch->ceWaitSignalQueue
+          curBatch->nCePut++;
+          curBatch->nCeWaitSignal++;
+        }
+      }
+
+      // ======================================================================
+      // Proxy Part: interNode communication for NEXT groupRound
+      // - Batch N processes Proxy for groupRound[N+1]
+      // ======================================================================
+      int proxyGroupIdx = batchIdx + 1;  // Proxy ops come from next groupRound
+      if (proxyGroupIdx < nValidGroupRounds) {
+        int proxyGroupDelta = validGroupDeltas[proxyGroupIdx];
+
+        int sendNode = (group + proxyGroupDelta) % nGroups;
+        int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[comm->localRank];
+        int recvNode = (group - proxyGroupDelta + nGroups) % nGroups;
+        int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[comm->localRank];
+
+        // Phase 1: recvRankSameRail --> rank (same rail, interNode)
+        {
+          // TODO: Create ncclTaskRma for receiving from recvRankSameRail
+          // Enqueue to curBatch->proxyWaitSignalQueue
+          curBatch->nProxyWaitSignal++;
+        }
+
+        // Phase 4: rank --> all ranks on sendNode (same rail, interNode)
+        {
+          for (int lr = 0; lr < comm->nodeRanks[sendNode].localRanks; lr++) {
+            int targetRank = comm->nodeRanks[sendNode].localRankToRank[lr];
+            // TODO: Create ncclTaskRma for sending to targetRank
+            // Enqueue to curBatch->proxyPutQueue
+            curBatch->nProxyPut++;
+          }
+        }
+      }
+    }
+
+    // Link batches into plan's rmaWorkBatchQueue
+    for (int i = 0; i < nBatches; i++) {
+      ncclIntruQueueEnqueue(&plan->rmaWorkBatchQueue, batches[i]);
+    }
+    plan->rmaCollArgs->nBatches = nBatches;
+
+    free(validGroupDeltas);
+    free(batches);
+  }
+
   return ncclSuccess;
 }
