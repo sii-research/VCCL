@@ -659,6 +659,7 @@ ncclResult_t ncclRmaPutProxy(struct ncclComm* comm, struct ncclKernelPlan* plan,
 
   int ctx = plan->rmaArgs->ctx;
   int nRmaTasksProxy = plan->rmaArgs->nRmaTasksProxy;
+  int runParallel = plan->rmaArgs->runParallel;
   struct ncclRmaProxyCtx * rmaProxyCtx = (struct ncclRmaProxyCtx *)comm->rmaState.rmaProxyState.rmaProxyCtxs[ctx];
 
   // Allocate 2*nRmaTasksProxy CUstreamBatchMemOpParams
@@ -678,8 +679,12 @@ ncclResult_t ncclRmaPutProxy(struct ncclComm* comm, struct ncclKernelPlan* plan,
     // If queue is full, flush pending batch ops to allow progress thread to free slots
     while ((pi - ci) >= rmaProxyCtx->queueSize) {
       if (batchIdx > 0) {
-        NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams), ret, fail);
-        NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams+nRmaTasksProxy), ret, fail);
+        if (runParallel) {
+          NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams), ret, fail);
+          NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams+nRmaTasksProxy), ret, fail);
+        } else {
+          NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, 2*batchIdx, batchParams), ret, fail);
+        }
         batchIdx = 0;
       }
       // Yield to allow progress thread to run and process pending entries
@@ -717,17 +722,31 @@ ncclResult_t ncclRmaPutProxy(struct ncclComm* comm, struct ncclKernelPlan* plan,
       desc->signal.val = 1;
     }
 
-    // Prepare the readySeq write operation
-    batchParams[batchIdx].writeValue.operation = CU_STREAM_MEM_OP_WRITE_VALUE_64;
-    batchParams[batchIdx].writeValue.address = (CUdeviceptr)&rmaProxyCtx->readySeqsDev[task->peer];
-    batchParams[batchIdx].writeValue.value = desc->seq;
-    batchParams[batchIdx].writeValue.flags = CU_STREAM_WRITE_VALUE_DEFAULT;
+    if (runParallel) {
+      // Prepare the readySeq write operation
+      batchParams[batchIdx].writeValue.operation = CU_STREAM_MEM_OP_WRITE_VALUE_64;
+      batchParams[batchIdx].writeValue.address = (CUdeviceptr)&rmaProxyCtx->readySeqsDev[task->peer];
+      batchParams[batchIdx].writeValue.value = desc->seq;
+      batchParams[batchIdx].writeValue.flags = CU_STREAM_WRITE_VALUE_DEFAULT;
 
-    // Prepare the doneSeq wait operation
-    batchParams[batchIdx+nRmaTasksProxy].waitValue.operation = CU_STREAM_MEM_OP_WAIT_VALUE_64;
-    batchParams[batchIdx+nRmaTasksProxy].waitValue.address = (CUdeviceptr)&rmaProxyCtx->doneSeqsDev[task->peer];
-    batchParams[batchIdx+nRmaTasksProxy].waitValue.value = desc->seq;
-    batchParams[batchIdx+nRmaTasksProxy].waitValue.flags = CU_STREAM_WAIT_VALUE_GEQ;
+      // Prepare the doneSeq wait operation
+      batchParams[batchIdx+nRmaTasksProxy].waitValue.operation = CU_STREAM_MEM_OP_WAIT_VALUE_64;
+      batchParams[batchIdx+nRmaTasksProxy].waitValue.address = (CUdeviceptr)&rmaProxyCtx->doneSeqsDev[task->peer];
+      batchParams[batchIdx+nRmaTasksProxy].waitValue.value = desc->seq;
+      batchParams[batchIdx+nRmaTasksProxy].waitValue.flags = CU_STREAM_WAIT_VALUE_GEQ;
+    } else {
+      // Prepare the readySeq write operation
+      batchParams[2*batchIdx].writeValue.operation = CU_STREAM_MEM_OP_WRITE_VALUE_64;
+      batchParams[2*batchIdx].writeValue.address = (CUdeviceptr)&rmaProxyCtx->readySeqsDev[task->peer];
+      batchParams[2*batchIdx].writeValue.value = desc->seq;
+      batchParams[2*batchIdx].writeValue.flags = CU_STREAM_WRITE_VALUE_DEFAULT;
+
+      // Prepare the doneSeq wait operation
+      batchParams[2*batchIdx+1].waitValue.operation = CU_STREAM_MEM_OP_WAIT_VALUE_64;
+      batchParams[2*batchIdx+1].waitValue.address = (CUdeviceptr)&rmaProxyCtx->doneSeqsDev[task->peer];
+      batchParams[2*batchIdx+1].waitValue.value = desc->seq;
+      batchParams[2*batchIdx+1].waitValue.flags = CU_STREAM_WAIT_VALUE_GEQ;
+    }
 
     INFO(NCCL_COLL, "ncclRmaPutProxy enqueued Desc: rank=%d peer=%d ctx=%d size=%ld signalMode=%d readySeq=%lu doneSeq=%lu",
       comm->rank, task->peer, ctx, task->count * ncclTypeSize(task->datatype), task->signalMode, (uint64_t)desc->seq, (uint64_t)desc->seq);
@@ -748,8 +767,12 @@ ncclResult_t ncclRmaPutProxy(struct ncclComm* comm, struct ncclKernelPlan* plan,
   if (batchIdx == nRmaTasksProxy) {
     NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, 2*batchIdx, batchParams), ret, fail);
   } else {
-    NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams), ret, fail);
-    NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams+nRmaTasksProxy), ret, fail);
+    if (runParallel) {
+      NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams), ret, fail);
+      NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, batchIdx, batchParams+nRmaTasksProxy), ret, fail);
+    } else {
+      NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, 2*batchIdx, batchParams), ret, fail);
+    }
   }
 
 exit:

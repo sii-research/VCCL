@@ -24,6 +24,7 @@ struct ncclRmaArgs{
   int nRmaTasks;
   int nRmaTasksProxy;
   int nRmaTasksCe;
+  int runParallel; // Whether to run tasks in parallel. Only used for PutProxy.
 };
 
 struct ncclRmaState {
@@ -44,7 +45,13 @@ struct ncclRmaCollArgs {
   ncclFunc_t func;
 };
 
+// Define ncclRmaWork to eliminate confusion about RMA Plans nested inside RmaColl Plan.
+// Use ncclKernelPlan internal to reuse existing rma execution infrastructure.
+// Only rmaArgs, rmaTaskQueueProxy and rmaTaskQueueCe fields are used in ncclRmaWork.
+using ncclRmaWork = ncclKernelPlan;
+
 constexpr int NCCL_RMA_COLL_MAX_STREAMS = 4;
+static_assert(NCCL_RMA_COLL_MAX_STREAMS >= 4, "NCCL_RMA_COLL_MAX_STREAMS must be at least 4");
 struct ncclRmaCollState {
   cudaStream_t rmaCollStream[NCCL_RMA_COLL_MAX_STREAMS];
   cudaEvent_t rmaCollEvent[NCCL_RMA_COLL_MAX_STREAMS];
