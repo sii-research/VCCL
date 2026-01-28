@@ -1512,7 +1512,8 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
   if (planner->nTasksColl + planner->nTasksP2p + planner->nTasksBcast != 0 ||
       !ncclIntruQueueEmpty(&planner->collSymTaskQueue) ||
       !ncclIntruQueueEmpty(&planner->collCeTaskQueue) ||
-      planner->nTasksRma != 0) {
+      planner->nTasksRma != 0 ||
+      planner->nTasksRmaColl != 0) {
     do {
       memset(&planner->wipPlan, 0, sizeof(planner->wipPlan));
 
@@ -1527,6 +1528,12 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
       if (planner->nTasksRma != 0) {
         NCCLCHECKGOTO(scheduleRmaTasksToPlan(comm, plan), result, failure);
         if (plan->isRma && plan->rmaArgs != NULL && plan->rmaArgs->nRmaTasks > 0) {
+          ncclIntruQueueEnqueue(&planner->planQueue, plan);
+          nPlans += 1;
+        }
+      } else if (planner->nTasksRmaColl != 0) {
+        NCCLCHECKGOTO(scheduleRmaCollTasksToPlan(comm, plan), result, failure);
+        if (plan->isRmaColl && plan->rmaCollArgs != NULL && plan->rmaCollArgs->nBatches > 0) {
           ncclIntruQueueEnqueue(&planner->planQueue, plan);
           nPlans += 1;
         }
@@ -1590,7 +1597,8 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
     } while (planner->nTasksColl + planner->nTasksP2p + planner->nTasksBcast != 0 ||
              !ncclIntruQueueEmpty(&planner->collSymTaskQueue) ||
              !ncclIntruQueueEmpty(&planner->collCeTaskQueue) ||
-             planner->nTasksRma != 0);
+             planner->nTasksRma != 0 ||
+             planner->nTasksRmaColl != 0);
 
     struct ncclKernelPlan* planHead = ncclIntruQueueHead(&planner->planQueue);
     planner->unlaunchedPlansHead = planHead;
@@ -2879,6 +2887,101 @@ static ncclResult_t rmaTaskAppend(
   return ncclSuccess;
 }
 
+ncclResult_t rmaCollTaskAppend(
+  struct ncclComm* comm,
+  struct ncclInfo* info
+  ) {
+  struct ncclKernelPlanner *planner = &comm->planner;
+
+  if (!comm->symmetricSupport){
+    WARN("RMA coll: symmetric registration is not supported in this communicator.");
+    return ncclInvalidArgument;
+  }
+
+  if (info->sendcounts == NULL || info->sdispls == NULL ||
+      info->recvcounts == NULL || info->rdispls == NULL) {
+    WARN("RMA coll: sendcounts/sdispls/recvcounts/rdispls must be provided.");
+    return ncclInvalidArgument;
+  }
+
+  if (!comm->rmaProxySupport && comm->nNodes > 1) {
+    WARN("RMA coll: RMA proxy is not supported in this communicator.");
+    return ncclInvalidArgument;
+  }
+
+  struct ncclDevrWindow* sendWin = nullptr;
+  struct ncclDevrWindow* recvWin = nullptr;
+  struct ncclDevrWindow* relayWin = nullptr;
+  size_t sendWinOffset = 0, recvWinOffset = 0, relayWinOffset = 0;
+  if (info->sendbuff == NULL) {
+    WARN("RMA coll: sendbuff is NULL");
+    return ncclInvalidArgument;
+  }
+  NCCLCHECK(ncclDevrFindWindow(comm, info->sendbuff, &sendWin));
+  if (sendWin == NULL || !(sendWin->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+    WARN("RMA coll: sendbuff is not in a valid symmetric window");
+    return ncclInvalidArgument;
+  }
+  sendWinOffset = (char*)info->sendbuff - (char*)sendWin->userPtr;
+
+  if (info->recvbuff == NULL) {
+    WARN("RMA coll: recvbuff is NULL");
+    return ncclInvalidArgument;
+  }
+  NCCLCHECK(ncclDevrFindWindow(comm, info->recvbuff, &recvWin));
+  if (recvWin == NULL || !(recvWin->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+    WARN("RMA coll: recvbuff is not in a valid symmetric window");
+    return ncclInvalidArgument;
+  }
+  recvWinOffset = (char*)info->recvbuff - (char*)recvWin->userPtr;
+
+  if (comm->nNodes > 1) {
+    if (info->relaybuff == NULL) {
+      WARN("RMA coll: relaybuff is required for multi-node but is NULL");
+      return ncclInvalidArgument;
+    }
+    NCCLCHECK(ncclDevrFindWindow(comm, info->relaybuff, &relayWin));
+    if (relayWin == NULL || !(relayWin->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+      WARN("RMA coll: relaybuff is not in a valid symmetric window");
+      return ncclInvalidArgument;
+    }
+    relayWinOffset = (char*)info->relaybuff - (char*)relayWin->userPtr;
+  }
+
+  // Check if RMA CE needs initialization
+  if (!comm->rmaState.rmaCeState.initialized && ncclIntruQueueEmpty(&comm->rmaCeInitTaskQueue)) {
+    struct ncclRmaCeInitTask* ceTask;
+    NCCLCHECK(ncclCalloc(&ceTask, 1));
+    ceTask->comm = comm;
+    ncclIntruQueueEnqueue(&comm->rmaCeInitTaskQueue, ceTask);
+    ncclGroupCommJoin(comm, ncclGroupTaskTypeSymRegister);
+  }
+
+  // Must be in thread local group before tasks can be alloc'd in `comm->memScoped`.
+  ncclGroupCommJoin(info->comm, ncclGroupTaskTypeCollective);
+  NCCLCHECK(ncclPlannerSetCapturingGraph(comm, info));
+
+  // Create a single task node containing the entire info
+  struct ncclTaskRmaColl* t = ncclMemoryPoolAlloc<struct ncclTaskRmaColl>(&comm->memPool_ncclTaskRmaColl, &comm->memPermanent);
+  t->func = info->coll;
+  t->sendWin = sendWin;
+  t->sendWinOffset = sendWinOffset;
+  t->recvWin = recvWin;
+  t->recvWinOffset = recvWinOffset;
+  t->relayWin = comm->nNodes > 1 ? relayWin : nullptr;
+  t->relayWinOffset = comm->nNodes > 1 ? relayWinOffset : 0;
+  t->sendcounts = info->sendcounts;
+  t->sdispls = info->sdispls;
+  t->recvcounts = info->recvcounts;
+  t->rdispls = info->rdispls;
+  t->datatype = info->datatype;
+  t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
+  planner->nTasksRmaColl++;
+  ncclIntruQueueEnqueue(&planner->collRmaTaskQueue, t);
+
+  return ncclSuccess;
+}
+
 // Converts `info` to a task and adds it to `comm->planner`. The exception is with
 // single rank communicators, collectives are issued as `ncclMemcpyAsync`s and
 // thus don't need a task.
@@ -2889,6 +2992,8 @@ static ncclResult_t taskAppend(struct ncclComm* comm, struct ncclInfo* info) {
     NCCLCHECK(p2pTaskAppend(comm, info, info->coll, collAPI, (void*)info->recvbuff, info->count, info->datatype, info->root, true));
   } else if (info->coll == ncclFuncPutSignal || info->coll == ncclFuncSignal || info->coll == ncclFuncWaitSignal) {
     NCCLCHECK(rmaTaskAppend(comm, info));
+  } else if (info->coll == ncclFuncAlltoAllV) {
+    NCCLCHECK(rmaCollTaskAppend(comm, info));
   } else {
     // Empty collectives can be discarded.
     if (info->count == 0) return ncclSuccess;

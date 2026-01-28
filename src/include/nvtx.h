@@ -42,6 +42,7 @@
 #define NVTX_SID_PutSignal            21
 #define NVTX_SID_Signal               22
 #define NVTX_SID_WaitSignal           23
+#define NVTX_SID_AlltoAllv            24
 // When adding new schema IDs, DO NOT re-use/overlap with the enum schema ID below!
 
 // Define static schema ID for the reduction operation.

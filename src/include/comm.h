@@ -294,13 +294,28 @@ struct ncclTaskRma {
   uint8_t nChannels;
 };
 
-// TODO: fill the contents!!
 struct ncclTaskRmaColl {
   struct ncclTaskRmaColl* next;
   ncclFunc_t func;
-  size_t count;
+
+  // Window info for send buffer
+  struct ncclDevrWindow* sendWin;
+  size_t sendWinOffset;
+
+  // Window info for recv buffer
+  struct ncclDevrWindow* recvWin;
+  size_t recvWinOffset;
+
+  // Window info for relay buffer (optional, for multi-node)
+  struct ncclDevrWindow* relayWin;
+  size_t relayWinOffset;
+
+  // Counts and displacements
+  const size_t* sendcounts;
+  const size_t* sdispls;
+  const size_t* recvcounts;
+  const size_t* rdispls;
   ncclDataType_t datatype;
-  size_t bytes;
 
   // Profiler plugin
   int eActivationMask;
@@ -319,6 +334,7 @@ struct ncclRmaWorkBatch {
   int nProxyWaitSignal;
   int nCePut;
   int nCeWaitSignal;
+  int total; // total number of tasks (nProxyPut + nProxyWaitSignal + nCePut + nCeWaitSignal)
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> proxyPutQueue; // PutSignal & Signal Func
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> proxyWaitSignalQueue;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> cePutQueue; // PutSignal & Signal Func
@@ -706,6 +722,8 @@ struct ncclComm {
   struct ncclMemoryPool memPool_ncclTaskColl;
   struct ncclMemoryPool memPool_ncclTaskP2p;
   struct ncclMemoryPool memPool_ncclTaskRma;
+  struct ncclMemoryPool memPool_ncclTaskRmaColl;
+  struct ncclMemoryPool memPool_ncclRmaWorkBatch;
   struct ncclMemoryPool memPool_ncclProxyOp;
   struct ncclMemoryPool memPool_ncclKernelPlan;
   struct ncclMemoryPool memPool_ncclRmaProxyDesc;

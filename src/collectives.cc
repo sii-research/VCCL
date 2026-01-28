@@ -114,18 +114,22 @@ NCCL_API(ncclResult_t, ncclAlltoAllv, const void* sendbuff, const size_t* sendco
 ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
     const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
     const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
-  (void)sendbuff;
-  (void)sendcounts;
-  (void)sdispls;
-  (void)recvbuff;
-  (void)recvcounts;
-  (void)rdispls;
-  (void)relaybuff;
-  (void)datatype;
-  (void)comm;
-  (void)stream;
-  fprintf(stderr, "ncclAlltoAllv called\n");
-  return ncclSuccess;
+  // Calculate total send bytes for current rank: sum of all sendcounts for this rank
+  size_t totalBytes = 0;
+  if (comm && sendcounts) {
+    int nranks = comm->nRanks;
+    int rank = comm->rank;
+    for (int peer = 0; peer < nranks; peer++) {
+      totalBytes += sendcounts[rank * nranks + peer] * ncclTypeSize(datatype);
+    }
+  }
+  NVTX3_FUNC_WITH_PARAMS(AlltoAllv, NcclNvtxParamsAlltoAllv,
+    NVTX3_PAYLOAD(comm ? comm->commHash : 0, totalBytes));
+  struct ncclInfo info = { ncclFuncAlltoAllV, "AlltoAllv",
+    sendbuff, recvbuff, 0, datatype, ncclSum, 0, comm, stream, /* Args */
+    0, 0, 0, nullptr, 0, 0, 0, 0, nullptr,
+    sendcounts, sdispls, recvcounts, rdispls, relaybuff };
+  return ncclEnqueueCheck(&info);
 }
 
 NCCL_API(ncclResult_t, ncclAllReduce, const void* sendbuff, void* recvbuff, size_t count,
