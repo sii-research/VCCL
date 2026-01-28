@@ -2,6 +2,8 @@
  * CC operations implemented in RMA proxy and CE.
  */
 #include <assert.h>
+#include <algorithm>
+#include <cstring>
 #include "nccl.h"
 #include "alloc.h"
 #include "checks.h"
@@ -225,7 +227,6 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
     int batchIdx = 0;
     struct ncclRmaWorkBatch* curBatch = sched.batchesHead;
-    size_t eltSize = ncclTypeSize(task->datatype);
 
     // Calculate actual buffer addresses from window info
     void* sendBuff = (char*)task->sendWin->userPtr + task->sendWinOffset;
@@ -235,19 +236,84 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       // CE Part: intraNode communication
       if (batchIdx == 0) {
         // Batch 0: nodeRound 0 (pure intraNode, all local ranks)
+        // Track per-peer signal counts for the wait task (use stack alloc, no free needed)
+        int* peerSignalCounts = ncclMemoryStackAlloc<int>(&comm->memScoped, sched.localRanks);
+        int* peerRanks = ncclMemoryStackAlloc<int>(&comm->memScoped, sched.localRanks);
+        int nPeersWithSignals = 0;
+
         for (int round = 0; round < sched.localRanks; round++) {
           int sendRank = comm->p2pSchedule[round].sendRank;
-          // int recvRank = comm->p2pSchedule[round].recvRank;
-
+          int recvRank = comm->p2pSchedule[round].recvRank;
           size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + sendRank];
           if (sendCount > 0) {
-            // size_t sdisp = task->sdispls[sched.rank * sched.nRanks + sendRank];
-            // size_t rdisp = task->rdispls[sendRank * sched.nRanks + sched.rank];
-            // TODO: Create ncclTaskRma and enqueue to curBatch->cePutQueue
-            // TODO: Create ncclTaskRma for signal and enqueue to curBatch->ceWaitSignalQueue
-            curBatch->nCePut++;
-            curBatch->nCeWaitSignal++;
+            size_t sdisp = task->sdispls[sched.rank * sched.nRanks + sendRank];
+            size_t rdisp = task->rdispls[sendRank * sched.nRanks + sched.rank];
+            size_t totalBytes = sendCount * sched.eltSize;
+            int numChunks = 1;
+            if (totalBytes > sched.chunkSize) {
+              numChunks = (totalBytes + sched.chunkSize - 1) / sched.chunkSize;
+            }
+
+            for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+              size_t chunkOffset = chunkIdx * sched.chunkSize;
+              size_t chunkBytes = std::min(sched.chunkSize, totalBytes - chunkOffset);
+
+              struct ncclTaskRma* cePutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+              cePutTask->func = ncclFuncPutSignal;
+              cePutTask->ctx = 0;
+              cePutTask->count = chunkBytes / sched.eltSize;
+              cePutTask->datatype = task->datatype;
+              cePutTask->bytes = chunkBytes;
+              cePutTask->srcBuff = (char*)sendBuff + sdisp * sched.eltSize + chunkOffset;
+              cePutTask->peer = sendRank;
+              cePutTask->peerWinOffset = task->recvWinOffset + rdisp * sched.eltSize + chunkOffset;
+              cePutTask->peerWinHost = task->recvWin;
+              cePutTask->signalMode = NCCL_SIGNAL;
+
+              ncclIntruQueueEnqueue(&curBatch->cePutQueue, cePutTask);
+              curBatch->nCePut++;
+            }
           }
+
+          // Recv part: rank receives from recvRank
+          size_t recvCount = task->recvcounts[recvRank * sched.nRanks + sched.rank];
+          if (recvCount > 0) {
+            // Record this peer and its signal count
+            peerRanks[nPeersWithSignals] = recvRank;
+            peerSignalCounts[nPeersWithSignals] = 1;
+            nPeersWithSignals++;
+          }
+        }
+
+        // Create ONE consolidated wait task for all signals in this batch
+        if (nPeersWithSignals > 0) {
+          struct ncclTaskRma* ceWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+          ceWaitTask->func = ncclFuncWaitSignal;
+          ceWaitTask->ctx = 0;
+          ceWaitTask->bytes = 0;
+          ceWaitTask->srcBuff = NULL;
+          ceWaitTask->srcWinHost = NULL;
+          ceWaitTask->peer = 0; // consolidated wait, not specific to one peer
+          ceWaitTask->peerWinOffset = 0;
+          ceWaitTask->peerWinHost = 0;
+          ceWaitTask->signalMode = NCCL_SIGNAL;
+
+          // Use stack alloc for peers and nsignals arrays
+          ceWaitTask->npeers = nPeersWithSignals;
+          ceWaitTask->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, nPeersWithSignals);
+          ceWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, nPeersWithSignals);
+          memcpy(ceWaitTask->peers, peerRanks, nPeersWithSignals * sizeof(int));
+          memcpy(ceWaitTask->nsignals, peerSignalCounts, nPeersWithSignals * sizeof(int));
+
+          // Calculate total for count field
+          int totalSignals = 0;
+          for (int i = 0; i < nPeersWithSignals; i++) {
+            totalSignals += peerSignalCounts[i];
+          }
+          ceWaitTask->count = totalSignals;
+
+          ncclIntruQueueEnqueue(&curBatch->ceWaitSignalQueue, ceWaitTask);
+          curBatch->nCeWaitSignal = 1; // Only one consolidated wait per batch
         }
       } else {
         // Batch N>0: nodeRound N's phase 2+3 (cross-rail intraNode)
