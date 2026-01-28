@@ -313,6 +313,8 @@ static ncclResult_t doLaunches(struct ncclComm* head) {
             NCCLCHECKGOTO(ncclLaunchKernelBefore_NoUncapturedCuda(comm, plan), result, failure);
             if (plan->isCeColl) {
               NCCLCHECKGOTO(ncclLaunchCeColl(comm, plan), result, failure);
+            } else if (plan->isRmaColl) {
+              NCCLCHECKGOTO(ncclLaunchRmaColl(comm, plan), result, failure);
             } else if (plan->isRma) {
               NCCLCHECKGOTO(ncclLaunchRma(comm, plan), result, failure);
             } else {

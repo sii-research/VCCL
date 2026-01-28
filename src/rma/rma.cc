@@ -162,6 +162,7 @@ ncclResult_t scheduleRmaTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan
   plan->rmaArgs->nRmaTasks = 0;
   plan->rmaArgs->nRmaTasksProxy = 0;
   plan->rmaArgs->nRmaTasksCe = 0;
+  plan->rmaArgs->runParallel = 1; // Default to run in parallel
 
   // WaitSignal tasks
   if (firstTask->func == ncclFuncWaitSignal) {
