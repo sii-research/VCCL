@@ -2904,17 +2904,6 @@ ncclResult_t rmaCollTaskAppend(
     return ncclInvalidArgument;
   }
 
-  const size_t eltSize = ncclTypeSize(info->datatype);
-
-  // Resolve windows for source and destination buffers
-  // struct ncclDevrWindow* srcWinHost = NULL;
-  // struct ncclDevrWindow* relayWinHost = NULL;
-  // struct ncclDevrWindow* recvWinHost = NULL;
-  // NCCLCHECK(ncclDevrFindWindow(comm, info->sendbuff, &srcWinHost));
-  // NCCLCHECK(ncclDevrFindWindow(comm, info->recvbuff, &recvWinHost));
-  // NCCLCHECK(ncclDevrFindWindow(comm, info->relaybuff, &relayWinHost));
-  // Use p2pSchedule round ordering
-
   // Check if RMA CE needs initialization
   if (!comm->rmaState.rmaCeState.initialized && ncclIntruQueueEmpty(&comm->rmaCeInitTaskQueue)) {
     struct ncclRmaCeInitTask* ceTask;
