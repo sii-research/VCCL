@@ -252,7 +252,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       } else {
         // Batch N>0: nodeRound N's phase 2+3 (cross-rail intraNode)
         int ceNodeDelta = sched.validNodeDeltas[batchIdx];
-        int ceRecvNode = (sched.node - ceNodeDelta + sched.nNodes) % sched.nNodes;
+        // int ceRecvNode = (sched.node - ceNodeDelta + sched.nNodes) % sched.nNodes;
         // int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
 
         // Phase 2: Data received at sameRail rank needs to be distributed locally
@@ -278,7 +278,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
         int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
         // int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
-        int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
+        // int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
         // int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
 
         // Phase 1: recvRankSameRail --> rank (same rail, interNode)
