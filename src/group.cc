@@ -317,8 +317,6 @@ static ncclResult_t doLaunches(struct ncclComm* head) {
               NCCLCHECKGOTO(ncclLaunchRmaColl(comm, plan), result, failure);
             } else if (plan->isRma) {
               NCCLCHECKGOTO(ncclLaunchRma(comm, plan), result, failure);
-            } else if (plan->isRmaColl) {
-              NCCLCHECKGOTO(ncclLaunchRmaColl(comm, plan), result, failure);
             } else {
               NCCLCHECKGOTO(ncclLaunchKernel(comm, plan), result, failure);
             }
