@@ -50,25 +50,23 @@ static ncclResult_t launchRmaOpHelper(struct ncclComm* comm, struct ncclRmaCollS
   return ncclSuccess;
 }
 
-#define NCCL_NODE_SIZE 8
-
 struct ncclRmaCollSchedule {
   // Topology info
   int rank;
   int nRanks;
   int localRank;
   int localRanks;
-  int group;           // which node group this rank belongs to
-  int nGroups;         // total number of node groups
-  int nGroupsPow2;     // power of 2 >= nGroups
+  int node;            // which node this rank belongs to
+  int nNodes;          // total number of nodes
+  int nNodesPow2;      // power of 2 >= nNodes
 
   // Data transfer info
   size_t eltSize;
   size_t chunkSize;
 
-  // Valid group deltas for interNode communication (skipping delta=0)
-  int* validGroupDeltas;
-  int nValidGroupRounds;
+  // Valid node deltas for interNode communication (skipping delta=0)
+  int* validNodeDeltas;
+  int nValidNodeRounds;
 
   // Batches
   int nBatches;
@@ -175,27 +173,27 @@ static ncclResult_t rmaCollTasksPrepare(
   sched->nRanks = comm->nRanks;
   sched->localRank = comm->localRank;
   sched->localRanks = comm->localRanks;
-  sched->group = comm->localRank / NCCL_NODE_SIZE;
-  sched->nGroups = comm->nRanks / NCCL_NODE_SIZE;
-  sched->nGroupsPow2 = pow2Up(sched->nGroups);
+  sched->node = comm->rank / comm->localRanks;
+  sched->nNodes = comm->nRanks / comm->localRanks;
+  sched->nNodesPow2 = pow2Up(sched->nNodes);
 
   // Initialize data transfer info
   sched->eltSize = ncclTypeSize(task->datatype);
   sched->chunkSize = 1ULL << 30; // 1GB
 
-  // Compute valid group deltas (for interNode rounds, starting from delta=1)
-  NCCLCHECK(ncclCalloc(&sched->validGroupDeltas, sched->nGroupsPow2));
-  int groupDelta = 1;
-  sched->nValidGroupRounds = 0;
-  for (int gr = 0; gr < sched->nGroupsPow2; gr++) {
-    if (groupDelta < sched->nGroups) {
-      sched->validGroupDeltas[sched->nValidGroupRounds++] = groupDelta;
+  // Compute valid node deltas (for interNode rounds, starting from delta=1)
+  NCCLCHECK(ncclCalloc(&sched->validNodeDeltas, sched->nNodesPow2));
+  int nodeDelta = 1;
+  sched->nValidNodeRounds = 0;
+  for (int nr = 0; nr < sched->nNodesPow2; nr++) {
+    if (nodeDelta < sched->nNodes) {
+      sched->validNodeDeltas[sched->nValidNodeRounds++] = nodeDelta;
     }
-    groupDelta = (groupDelta + gr + 1) & (sched->nGroupsPow2 - 1);
+    nodeDelta = (nodeDelta + nr + 1) & (sched->nNodesPow2 - 1);
   }
 
-  // Allocate batches (one per valid groupRound)
-  sched->nBatches = sched->nValidGroupRounds;
+  // Allocate batches (one per valid nodeRound)
+  sched->nBatches = sched->nValidNodeRounds;
   sched->batchesHead = nullptr;
   struct ncclRmaWorkBatch* prevBatch = nullptr;
   for (int i = 0; i < sched->nBatches; i++) {
@@ -233,7 +231,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       // CE Part: intraNode communication
       // ==================================================================
       if (batchIdx == 0) {
-        // Batch 0: groupRound 0 (pure intraNode, all local ranks)
+        // Batch 0: nodeRound 0 (pure intraNode, all local ranks)
         for (int round = 0; round < sched.localRanks; round++) {
           int sendRank = comm->p2pSchedule[round].sendRank;
           int recvRank = comm->p2pSchedule[round].recvRank;
@@ -252,9 +250,9 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           }
         }
       } else {
-        // Batch N>0: groupRound N's phase 2+3 (cross-rail intraNode)
-        int ceGroupDelta = sched.validGroupDeltas[batchIdx];
-        int ceRecvNode = (sched.group - ceGroupDelta + sched.nGroups) % sched.nGroups;
+        // Batch N>0: nodeRound N's phase 2+3 (cross-rail intraNode)
+        int ceNodeDelta = sched.validNodeDeltas[batchIdx];
+        int ceRecvNode = (sched.node - ceNodeDelta + sched.nNodes) % sched.nNodes;
         int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
 
         // Phase 2: Data received at sameRail rank needs to be distributed locally
@@ -272,15 +270,15 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       }
 
       // ==================================================================
-      // Proxy Part: interNode communication for NEXT groupRound
+      // Proxy Part: interNode communication for NEXT nodeRound
       // ==================================================================
-      int proxyGroupIdx = batchIdx + 1;
-      if (proxyGroupIdx < sched.nValidGroupRounds) {
-        int proxyGroupDelta = sched.validGroupDeltas[proxyGroupIdx];
+      int proxyNodeIdx = batchIdx + 1;
+      if (proxyNodeIdx < sched.nValidNodeRounds) {
+        int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx];
 
-        int sendNode = (sched.group + proxyGroupDelta) % sched.nGroups;
+        int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
         int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
-        int recvNode = (sched.group - proxyGroupDelta + sched.nGroups) % sched.nGroups;
+        int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
         int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
 
         // Phase 1: recvRankSameRail --> rank (same rail, interNode)
@@ -319,7 +317,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       curBatch = curBatch->next;
     }
     plan->rmaCollArgs->nBatches = nValidBatches;
-    if (sched->validGroupDeltas) free(sched->validGroupDeltas);
+    if (sched.validNodeDeltas) free(sched.validNodeDeltas);
   }
   return ncclSuccess;
 }
