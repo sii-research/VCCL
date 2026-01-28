@@ -2921,7 +2921,6 @@ ncclResult_t rmaCollTaskAppend(
   struct ncclTaskRmaColl* t = ncclMemoryPoolAlloc<struct ncclTaskRmaColl>(&comm->memPool_ncclTaskRmaColl, &comm->memPermanent);
   t->func = info->coll;
   t->ctx = 0;
-  t->bytes = 0;
   t->sendBuff = info->sendbuff;
   t->recvBuff = info->recvbuff;
   t->sendcounts = info->sendcounts;

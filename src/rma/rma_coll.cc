@@ -214,7 +214,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
   struct ncclKernelPlanner* planner = &comm->planner;
   struct ncclTaskRmaColl* task = ncclIntruQueueDequeue(&planner->collRmaTaskQueue);
 
-  planner->isRmaColl = true;
+  plan->isRmaColl = true;
   plan->rmaCollArgs->func = task->func;
   plan->rmaCollArgs->nBatches = 0;
 
@@ -234,15 +234,15 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         // Batch 0: nodeRound 0 (pure intraNode, all local ranks)
         for (int round = 0; round < sched.localRanks; round++) {
           int sendRank = comm->p2pSchedule[round].sendRank;
-          int recvRank = comm->p2pSchedule[round].recvRank;
+          // int recvRank = comm->p2pSchedule[round].recvRank;
           if (sched.rank == sendRank) {
             // selfcopy
           }
 
           size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + sendRank];
           if (sendCount > 0) {
-            size_t sdisp = task->sdispls[sched.rank * sched.nRanks + sendRank];
-            size_t rdisp = task->rdispls[sendRank * sched.nRanks + sched.rank];
+            // size_t sdisp = task->sdispls[sched.rank * sched.nRanks + sendRank];
+            // size_t rdisp = task->rdispls[sendRank * sched.nRanks + sched.rank];
             // TODO: Create ncclTaskRma and enqueue to curBatch->cePutQueue
             // TODO: Create ncclTaskRma for signal and enqueue to curBatch->ceWaitSignalQueue
             curBatch->nCePut++;
@@ -253,7 +253,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         // Batch N>0: nodeRound N's phase 2+3 (cross-rail intraNode)
         int ceNodeDelta = sched.validNodeDeltas[batchIdx];
         int ceRecvNode = (sched.node - ceNodeDelta + sched.nNodes) % sched.nNodes;
-        int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
+        // int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
 
         // Phase 2: Data received at sameRail rank needs to be distributed locally
         // Phase 3: Other local ranks gather data to send to this rank
@@ -277,9 +277,9 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx];
 
         int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
-        int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
+        // int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
         int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
-        int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
+        // int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
 
         // Phase 1: recvRankSameRail --> rank (same rail, interNode)
         {
@@ -291,7 +291,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         // Phase 4: rank --> all ranks on sendNode (same rail, interNode)
         {
           for (int lr = 0; lr < comm->nodeRanks[sendNode].localRanks; lr++) {
-            int targetRank = comm->nodeRanks[sendNode].localRankToRank[lr];
+            // int targetRank = comm->nodeRanks[sendNode].localRankToRank[lr];
             // TODO: Create ncclTaskRma for sending to targetRank
             // Enqueue to curBatch->proxyPutQueue
             curBatch->nProxyPut++;
