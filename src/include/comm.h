@@ -90,12 +90,6 @@ struct cliqueInfo {
   int *ranks;
 };
 
-typedef enum {
-  NCCL_P2P_RDMA_READ = 0,
-  NCCL_P2P_RDMA_WRITE = 1,
-  NCCL_P2P_
-};
-
 struct ncclDestructor {
   struct ncclDestructor* next;
   void* obj;
@@ -334,6 +328,7 @@ struct ncclRmaWorkBatch {
   int nProxyWaitSignal;
   int nCePut;
   int nCeWaitSignal;
+  int total; // total number of tasks (nProxyPut + nProxyWaitSignal + nCePut + nCeWaitSignal)
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> proxyPutQueue; // PutSignal & Signal Func
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> proxyWaitSignalQueue;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> cePutQueue; // PutSignal & Signal Func
@@ -722,6 +717,7 @@ struct ncclComm {
   struct ncclMemoryPool memPool_ncclTaskP2p;
   struct ncclMemoryPool memPool_ncclTaskRma;
   struct ncclMemoryPool memPool_ncclTaskRmaColl;
+  struct ncclMemoryPool memPool_ncclRmaWorkBatch;
   struct ncclMemoryPool memPool_ncclProxyOp;
   struct ncclMemoryPool memPool_ncclKernelPlan;
   struct ncclMemoryPool memPool_ncclRmaProxyDesc;

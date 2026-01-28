@@ -72,7 +72,7 @@ struct ncclRmaCollSchedule {
 
   // Batches
   int nBatches;
-  struct ncclRmaWorkBatch** batches;
+  struct ncclRmaWorkBatch* batchesHead;
 };
 
 ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* plan) {
@@ -162,14 +162,14 @@ static inline bool isSameRail(struct ncclComm* comm, int rank1, int rank2) {
 }
 
 // Helper to allocate and initialize a new RMA work batch
-static ncclResult_t allocRmaWorkBatch(struct ncclRmaWorkBatch** batchOut) {
-  struct ncclRmaWorkBatch* batch;
-  NCCLCHECK(ncclCalloc(&batch, 1));
+static ncclResult_t allocRmaWorkBatch(struct ncclComm* comm, struct ncclRmaWorkBatch** batchOut) {
+  struct ncclRmaWorkBatch* batch = ncclMemoryPoolAlloc<struct ncclRmaWorkBatch>(&comm->memPool_ncclRmaWorkBatch, &comm->memPermanent);
   batch->next = nullptr;
   batch->nProxyPut = 0;
   batch->nProxyWaitSignal = 0;
   batch->nCePut = 0;
   batch->nCeWaitSignal = 0;
+  batch->total = 0;
   *batchOut = batch;
   return ncclSuccess;
 }
@@ -204,17 +204,20 @@ static ncclResult_t rmaCollTasksPrepare(
 
   // Allocate batches (one per valid groupRound)
   sched->nBatches = sched->nValidGroupRounds;
-  NCCLCHECK(ncclCalloc(&sched->batches, sched->nBatches));
+  sched->batchesHead = nullptr;
+  struct ncclRmaWorkBatch* prevBatch = nullptr;
   for (int i = 0; i < sched->nBatches; i++) {
-    NCCLCHECK(allocRmaWorkBatch(&sched->batches[i]));
+    struct ncclRmaWorkBatch* batch;
+    NCCLCHECK(allocRmaWorkBatch(comm, &batch));
+    if (prevBatch == nullptr) {
+      sched->batchesHead = batch;
+    } else {
+      prevBatch->next = batch;
+    }
+    prevBatch = batch;
   }
 
   return ncclSuccess;
-}
-
-static void rmaCollScheduleFree(struct ncclRmaCollSchedule* sched) {
-  if (sched->validGroupDeltas) free(sched->validGroupDeltas);
-  if (sched->batches) free(sched->batches);
 }
 
 ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
@@ -230,8 +233,9 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
     struct ncclRmaCollSchedule sched;
     NCCLCHECK(rmaCollTasksPrepare(comm, task, &sched));
 
-    for (int batchIdx = 0; batchIdx < sched.nBatches; batchIdx++) {
-      struct ncclRmaWorkBatch* curBatch = sched.batches[batchIdx];
+    int batchIdx = 0;
+    struct ncclRmaWorkBatch* curBatch = sched.batchesHead;
+    while (curBatch != nullptr) {
 
       // ==================================================================
       // CE Part: intraNode communication
@@ -304,15 +308,26 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           }
         }
       }
+      
+      curBatch->total = curBatch->nProxyPut + curBatch->nProxyWaitSignal + 
+                       curBatch->nCePut + curBatch->nCeWaitSignal;
+      // Move to next batch
+      curBatch = curBatch->next;
+      batchIdx++;
     }
 
     // Link batches into plan's rmaWorkBatchQueue
-    for (int i = 0; i < sched.nBatches; i++) {
-      ncclIntruQueueEnqueue(&plan->rmaWorkBatchQueue, sched.batches[i]);
+    curBatch = sched.batchesHead;
+    int nValidBatches = 0;
+    while (curBatch != nullptr) {
+      if (curBatch->total > 0) {
+        ncclIntruQueueEnqueue(&plan->rmaWorkBatchQueue, curBatch);
+        nValidBatches++;
+      }
+      curBatch = curBatch->next;
     }
-    plan->rmaCollArgs->nBatches = sched.nBatches;
-
-    rmaCollScheduleFree(&sched);
+    plan->rmaCollArgs->nBatches = nValidBatches;
+    if (sched->validGroupDeltas) free(sched->validGroupDeltas);
   }
 
   return ncclSuccess;
