@@ -481,6 +481,7 @@ static ncclResult_t commAlloc(struct ncclComm* comm, struct ncclComm* parent, in
   ncclMemoryPoolConstruct(&comm->memPool_ncclProxyOp);
   ncclMemoryPoolConstruct(&comm->memPool_ncclRmaProxyDesc);
   ncclMemoryPoolConstruct(&comm->memPool_ncclRmaWorkBatch);
+  ncclMemoryPoolConstruct(&comm->memPool_ncclTaskRmaColl);
 
   for (int i = 0; i < ncclGroupTaskTypeNum; i++) {
     comm->groupNext[i] = reinterpret_cast<struct ncclComm*>(0x1);

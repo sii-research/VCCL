@@ -225,19 +225,19 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
     int batchIdx = 0;
     struct ncclRmaWorkBatch* curBatch = sched.batchesHead;
-    while (curBatch != nullptr) {
+    size_t eltSize = ncclTypeSize(task->datatype);
 
-      // ==================================================================
+    // Calculate actual buffer addresses from window info
+    void* sendBuff = (char*)task->sendWin->userPtr + task->sendWinOffset;
+    void* recvBuff = (char*)task->recvWin->userPtr + task->recvWinOffset;
+
+    while (curBatch != nullptr) {
       // CE Part: intraNode communication
-      // ==================================================================
       if (batchIdx == 0) {
         // Batch 0: nodeRound 0 (pure intraNode, all local ranks)
         for (int round = 0; round < sched.localRanks; round++) {
           int sendRank = comm->p2pSchedule[round].sendRank;
           // int recvRank = comm->p2pSchedule[round].recvRank;
-          if (sched.rank == sendRank) {
-            // selfcopy
-          }
 
           size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + sendRank];
           if (sendCount > 0) {

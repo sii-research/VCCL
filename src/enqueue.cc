@@ -2,7 +2,7 @@
  * Copyright (c) 2017-2022, NVIDIA CORPORATION. All rights reserved.
  *
  * See LICENSE.txt for license information
-************************************************************************/
+ ************************************************************************/
 
 #include "enqueue.h"
 #include "argcheck.h"
@@ -2904,6 +2904,50 @@ ncclResult_t rmaCollTaskAppend(
     return ncclInvalidArgument;
   }
 
+  if (!comm->rmaProxySupport && comm->nNodes > 1) {
+    WARN("RMA coll: RMA proxy is not supported in this communicator.");
+    return ncclInvalidArgument;
+  }
+
+  struct ncclDevrWindow* sendWin = nullptr;
+  struct ncclDevrWindow* recvWin = nullptr;
+  struct ncclDevrWindow* relayWin = nullptr;
+  size_t sendWinOffset = 0, recvWinOffset = 0, relayWinOffset = 0;
+  if (info->sendbuff == NULL) {
+    WARN("RMA coll: sendbuff is NULL");
+    return ncclInvalidArgument;
+  }
+  NCCLCHECK(ncclDevrFindWindow(comm, info->sendbuff, &sendWin));
+  if (sendWin == NULL || !(sendWin->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+    WARN("RMA coll: sendbuff is not in a valid symmetric window");
+    return ncclInvalidArgument;
+  }
+  sendWinOffset = (char*)info->sendbuff - (char*)sendWin->userPtr;
+
+  if (info->recvbuff == NULL) {
+    WARN("RMA coll: recvbuff is NULL");
+    return ncclInvalidArgument;
+  }
+  NCCLCHECK(ncclDevrFindWindow(comm, info->recvbuff, &recvWin));
+  if (recvWin == NULL || !(recvWin->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+    WARN("RMA coll: recvbuff is not in a valid symmetric window");
+    return ncclInvalidArgument;
+  }
+  recvWinOffset = (char*)info->recvbuff - (char*)recvWin->userPtr;
+
+  if (comm->nNodes > 1) {
+    if (info->relaybuff == NULL) {
+      WARN("RMA coll: relaybuff is required for multi-node but is NULL");
+      return ncclInvalidArgument;
+    }
+    NCCLCHECK(ncclDevrFindWindow(comm, info->relaybuff, &relayWin));
+    if (relayWin == NULL || !(relayWin->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+      WARN("RMA coll: relaybuff is not in a valid symmetric window");
+      return ncclInvalidArgument;
+    }
+    relayWinOffset = (char*)info->relaybuff - (char*)relayWin->userPtr;
+  }
+
   // Check if RMA CE needs initialization
   if (!comm->rmaState.rmaCeState.initialized && ncclIntruQueueEmpty(&comm->rmaCeInitTaskQueue)) {
     struct ncclRmaCeInitTask* ceTask;
@@ -2920,17 +2964,17 @@ ncclResult_t rmaCollTaskAppend(
   // Create a single task node containing the entire info
   struct ncclTaskRmaColl* t = ncclMemoryPoolAlloc<struct ncclTaskRmaColl>(&comm->memPool_ncclTaskRmaColl, &comm->memPermanent);
   t->func = info->coll;
-  t->ctx = 0;
-  t->sendBuff = info->sendbuff;
-  t->recvBuff = info->recvbuff;
+  t->sendWin = sendWin;
+  t->sendWinOffset = sendWinOffset;
+  t->recvWin = recvWin;
+  t->recvWinOffset = recvWinOffset;
+  t->relayWin = comm->nNodes > 1 ? relayWin : nullptr;
+  t->relayWinOffset = comm->nNodes > 1 ? relayWinOffset : 0;
   t->sendcounts = info->sendcounts;
   t->sdispls = info->sdispls;
   t->recvcounts = info->recvcounts;
   t->rdispls = info->rdispls;
-  t->relaybuff = info->relaybuff;
   t->datatype = info->datatype;
-  t->comm = info->comm;
-  t->stream = info->stream;
   t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
   planner->nTasksRmaColl++;
   ncclIntruQueueEnqueue(&planner->collRmaTaskQueue, t);

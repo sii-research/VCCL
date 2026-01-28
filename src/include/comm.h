@@ -294,23 +294,29 @@ struct ncclTaskRma {
   uint8_t nChannels;
 };
 
-// TODO: fill the contents!!
 struct ncclTaskRmaColl {
   struct ncclTaskRmaColl* next;
   ncclFunc_t func;
-  int ctx;
-  
-  void const* sendBuff;
-  void const* recvBuff;
+
+  // Window info for send buffer
+  struct ncclDevrWindow* sendWin;
+  size_t sendWinOffset;
+
+  // Window info for recv buffer
+  struct ncclDevrWindow* recvWin;
+  size_t recvWinOffset;
+
+  // Window info for relay buffer (optional, for multi-node)
+  struct ncclDevrWindow* relayWin;
+  size_t relayWinOffset;
+
+  // Counts and displacements
   const size_t* sendcounts;
   const size_t* sdispls;
   const size_t* recvcounts;
   const size_t* rdispls;
-  const void* relaybuff;
   ncclDataType_t datatype;
-  ncclComm_t comm;
-  cudaStream_t stream;
-  
+
   // Profiler plugin
   int eActivationMask;
   void* groupApiEventHandle;
