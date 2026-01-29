@@ -326,16 +326,13 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
 
         // Phase 2: Data received at sameRail rank needs to be distributed locally
-
+        
 
 
         // Phase 3: Other local ranks gather data to send to this rank
         for (int lr = 0; lr < sched.localRanks; lr++) {
           int localPeerRank = comm->localRankToRank[lr];
           if (localPeerRank == sched.rank) continue; // skip self
-
-          // TODO: Create ncclTaskRma for phase 2 (local distribution from recvRankSameRail)
-          // TODO: Create ncclTaskRma for phase 3 (local gathering to rank)
           // Enqueue to curBatch->cePutQueue and curBatch->ceWaitSignalQueue
           curBatch->nCePut++;
           curBatch->nCeWaitSignal = 1;
@@ -406,6 +403,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
               if (totalBytes > sched.chunkSize) {
                 numChunks = (totalBytes + sched.chunkSize - 1) / sched.chunkSize;
               }
+              bool receiverIsSameRailRank = targetRank == sendRankSameRail;
               for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
                 size_t chunkOffset = chunkIdx * sched.chunkSize;
                 size_t chunkBytes = std::min(sched.chunkSize, totalBytes - chunkOffset);
@@ -419,8 +417,9 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
                 proxyPutTask->srcWinOffset = task->sendWinOffset + sdisp * sched.eltSize + chunkOffset;
                 proxyPutTask->srcWinHost = task->sendWin;
                 proxyPutTask->peer = sendRankSameRail;
-                proxyPutTask->peerWinOffset = task->relayWinOffset + relayToggleOffset + sdisp * sched.eltSize + chunkOffset;
-                proxyPutTask->peerWinHost = task->relayWin;
+                proxyPutTask->peerWinOffset = receiverIsSameRailRank ? task->recvWinOffset +  sdisp * sched.eltSize + chunkOffset
+                                              : task->relayWinOffset + relayToggleOffset + sdisp * sched.eltSize + chunkOffset;
+                proxyPutTask->peerWinHost = receiverIsSameRailRank ? task->recvWin : task->relayWin;
                 bool isLastChunk = (chunkIdx == numChunks - 1);
                 if (isLastChunk) {
                   proxyPutTask->signalMode = NCCL_SIGNAL;
