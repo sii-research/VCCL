@@ -189,7 +189,7 @@ static ncclResult_t rmaCollTasksPrepare(
   sched->nValidNodeRounds = 0;
   for (int nr = 0; nr < sched->nNodesPow2; nr++) {
     if (nodeDelta < sched->nNodes) {
-      sched->validNodeDeltas[sched->nValidNodeRounds++] = nodeDelta - 1;
+      sched->validNodeDeltas[sched->nValidNodeRounds++] = nodeDelta;
     }
     nodeDelta = (nodeDelta + nr + 1) & (sched->nNodesPow2 - 1);
   }
@@ -415,7 +415,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       // Proxy Part: interNode communication for NEXT nodeRound
       int proxyNodeIdx = batchIdx + 1;
       if (proxyNodeIdx < sched.nValidNodeRounds) {
-        int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx] + 1;
+        int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx];
 
         int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
         int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
