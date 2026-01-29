@@ -369,12 +369,46 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           }
         }
 
-        // Phase 3: Other local ranks gather data to send to this rank
+        // Phase 3: Other local ranks gather data to send to this rank (wait for signals)
+        int* peerSignalCounts = ncclMemoryStackAlloc<int>(&comm->memScoped, sched.localRanks);
+        int* peerRanks = ncclMemoryStackAlloc<int>(&comm->memScoped, sched.localRanks);
+        int nPeersWithSignals = 0;
         for (int lr = 0; lr < sched.localRanks; lr++) {
           int localPeerRank = comm->localRankToRank[lr];
-          if (localPeerRank == sched.rank) continue; // skip self
-          
-          curBatch->nCeWaitSignal = 1;
+          int remoteRank = comm->nodeRanks[ceRecvNode].localRankToRank[lr];
+          size_t recvCount = task->recvcounts[remoteRank * sched.nRanks + sched.rank];
+          if (recvCount > 0) {
+            peerRanks[nPeersWithSignals] = localPeerRank;
+            peerSignalCounts[nPeersWithSignals] = 1;
+            nPeersWithSignals++;
+          }
+        }
+        if (nPeersWithSignals > 0) {
+          struct ncclTaskRma* ceWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+          ceWaitTask->func = ncclFuncWaitSignal;
+          ceWaitTask->ctx = 0;
+          ceWaitTask->bytes = 0;
+          ceWaitTask->srcBuff = NULL;
+          ceWaitTask->srcWinHost = NULL;
+          ceWaitTask->peer = 0; // consolidated wait, not specific to one peer
+          ceWaitTask->peerWinOffset = 0;
+          ceWaitTask->peerWinHost = 0;
+          ceWaitTask->signalMode = NCCL_SIGNAL;
+
+          ceWaitTask->npeers = nPeersWithSignals;
+          ceWaitTask->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, nPeersWithSignals);
+          ceWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, nPeersWithSignals);
+          memcpy(ceWaitTask->peers, peerRanks, nPeersWithSignals * sizeof(int));
+          memcpy(ceWaitTask->nsignals, peerSignalCounts, nPeersWithSignals * sizeof(int));
+
+          int totalSignals = 0;
+          for (int i = 0; i < nPeersWithSignals; i++) {
+            totalSignals += peerSignalCounts[i];
+          }
+          ceWaitTask->count = totalSignals;
+
+          ncclIntruQueueEnqueue(&curBatch->ceWaitSignalQueue, ceWaitTask);
+          curBatch->nCeWaitSignal = 1; // Only one consolidated wait per batch
         }
       }
 
