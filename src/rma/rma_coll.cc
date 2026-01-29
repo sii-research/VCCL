@@ -183,13 +183,13 @@ static ncclResult_t rmaCollTasksPrepare(
   sched->eltSize = ncclTypeSize(task->datatype);
   sched->chunkSize = 1ULL << 30; // 1GB
 
-  // Compute valid node deltas (for interNode rounds, starting from delta=1)
+  // Compute valid node deltas (for interNode rounds, starting from delta=0)
   NCCLCHECK(ncclCalloc(&sched->validNodeDeltas, sched->nNodesPow2));
-  int nodeDelta = 1;
+  int nodeDelta = 0;
   sched->nValidNodeRounds = 0;
   for (int nr = 0; nr < sched->nNodesPow2; nr++) {
     if (nodeDelta < sched->nNodes) {
-      sched->validNodeDeltas[sched->nValidNodeRounds++] = nodeDelta;
+      sched->validNodeDeltas[sched->nValidNodeRounds++] = nodeDelta - 1;
     }
     nodeDelta = (nodeDelta + nr + 1) & (sched->nNodesPow2 - 1);
   }
@@ -317,11 +317,14 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         }
       } else {
         // Batch N>0: nodeRound N's phase 2+3 (cross-rail intraNode)
-        int ceNodeDelta = sched.validNodeDeltas[batchIdx];
-        // int ceRecvNode = (sched.node - ceNodeDelta + sched.nNodes) % sched.nNodes;
-        // int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
+        int ceNodeDelta = sched.validNodeDeltas[batchIdx] + 1;
+        int ceRecvNode = (sched.node - ceNodeDelta + sched.nNodes) % sched.nNodes;
+        int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
 
         // Phase 2: Data received at sameRail rank needs to be distributed locally
+
+
+
         // Phase 3: Other local ranks gather data to send to this rank
         for (int lr = 0; lr < sched.localRanks; lr++) {
           int localPeerRank = comm->localRankToRank[lr];
@@ -330,8 +333,8 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           // TODO: Create ncclTaskRma for phase 2 (local distribution from recvRankSameRail)
           // TODO: Create ncclTaskRma for phase 3 (local gathering to rank)
           // Enqueue to curBatch->cePutQueue and curBatch->ceWaitSignalQueue
-          curBatch->nCePut++;
-          curBatch->nCeWaitSignal++;
+          curBatch->nCePut = 1;
+          curBatch->nCeWaitSignal = 1;
         }
       }
 
@@ -340,27 +343,55 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       // ==================================================================
       int proxyNodeIdx = batchIdx + 1;
       if (proxyNodeIdx < sched.nValidNodeRounds) {
-        int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx];
+        int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx] + 1;
 
         int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
-        // int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
-        // int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
-        // int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
+        int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
+        int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
+        int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
 
         // Phase 1: recvRankSameRail --> rank (same rail, interNode)
         {
-          // TODO: Create ncclTaskRma for receiving from recvRankSameRail
+          // Create ncclTaskRma for receiving from recvRankSameRail
           // Enqueue to curBatch->proxyWaitSignalQueue
-          curBatch->nProxyWaitSignal++;
+          int nSignalsFromRecvRankSameRail = 0;
+          for (int lr = 0; lr < sched.localRanks; lr++) {
+            int destRank = comm->nodeRanks[sched.node].localRankToRank[lr];
+            size_t sendCount = task->sendcounts[recvRankSameRail * sched.nRanks + destRank];
+            if (sendCount > 0) {
+              nSignalsFromRecvRankSameRail++;
+            }
+          }
+          if (nSignalsFromRecvRankSameRail > 0) {
+            struct ncclTaskRma* proxyWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+            proxyWaitTask->func = ncclFuncWaitSignal;
+            proxyWaitTask->ctx = 0;
+            proxyWaitTask->bytes = 0;
+            proxyWaitTask->srcBuff = NULL;
+            proxyWaitTask->srcWinHost = NULL;
+            proxyWaitTask->peer = 0;
+            proxyWaitTask->peerWinOffset = 0;
+            proxyWaitTask->peerWinHost = NULL;
+            proxyWaitTask->signalMode = NCCL_SIGNAL;
+
+            proxyWaitTask->npeers = 1;
+            proxyWaitTask->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
+            proxyWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
+            proxyWaitTask->peers[0] = recvRankSameRail;
+            proxyWaitTask->nsignals[0] = nSignalsFromRecvRankSameRail;
+            proxyWaitTask->count = nSignalsFromRecvRankSameRail;
+            ncclIntruQueueEnqueue(&curBatch->proxyWaitSignalQueue, proxyWaitTask);
+            curBatch->nProxyWaitSignal=1; // Only one per batch
+          }
         }
 
         // Phase 4: rank --> all ranks on sendNode (same rail, interNode)
         {
           for (int lr = 0; lr < comm->nodeRanks[sendNode].localRanks; lr++) {
-            // int targetRank = comm->nodeRanks[sendNode].localRankToRank[lr];
+            int targetRank = comm->nodeRanks[sendNode].localRankToRank[lr];
             // TODO: Create ncclTaskRma for sending to targetRank
             // Enqueue to curBatch->proxyPutQueue
-            curBatch->nProxyPut++;
+            curBatch->nProxyPut = 1;
           }
         }
       }
