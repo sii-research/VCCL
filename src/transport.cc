@@ -12,6 +12,7 @@
 #include "transport.h"
 #include <vector>
 NCCL_PARAM(PassSm, "PASS_SM", 0); 
+NCCL_PARAM(LowMemoryMode, "LOW_MEMORY_MODE", 0);
 
 struct ncclTransport* ncclTransports[NTRANSPORTS+3] = {
   &p2pTransport,
