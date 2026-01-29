@@ -326,15 +326,54 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
 
         // Phase 2: Data received at sameRail rank needs to be distributed locally
-        
+        size_t relayHalfBytes = 0;
+        if (task->recvWinOffset > task->relayWinOffset) {
+          relayHalfBytes = (task->recvWinOffset - task->relayWinOffset) / 2;
+        }
+        size_t relayToggleOffset = ((batchIdx - 1) & 1) ? relayHalfBytes : 0;
+        char* relayBuff = (char*)task->relayWin->userPtr + task->relayWinOffset;
+        for (int lr = 0; lr < sched.localRanks; lr++) {
+          int destRank = comm->localRankToRank[lr];
+          size_t sendCount = task->sendcounts[ceRecvRankSameRail * sched.nRanks + destRank];
+          if (sendCount == 0 || lr == sched.localRank) continue;
+          size_t sdisp = task->sdispls[ceRecvRankSameRail * sched.nRanks + destRank];
+          size_t rdisp = task->rdispls[destRank * sched.nRanks + ceRecvRankSameRail];
+          size_t totalBytes = sendCount * sched.eltSize;
+          int numChunks = 1;
+          if (totalBytes > sched.chunkSize) {
+            numChunks = (totalBytes + sched.chunkSize - 1) / sched.chunkSize;
+          }
+          for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+            size_t chunkOffset = chunkIdx * sched.chunkSize;
+            size_t chunkBytes = std::min(sched.chunkSize, totalBytes - chunkOffset);
 
+            struct ncclTaskRma* cePutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+            cePutTask->func = ncclFuncPutSignal;
+            cePutTask->ctx = 0;
+            cePutTask->count = chunkBytes / sched.eltSize;
+            cePutTask->datatype = task->datatype;
+            cePutTask->bytes = chunkBytes;
+            // transform from win+offset to address
+            cePutTask->srcBuff = relayBuff + relayToggleOffset + sdisp * sched.eltSize + chunkOffset;
+            cePutTask->peer = destRank;
+            cePutTask->peerWinOffset = task->recvWinOffset + rdisp * sched.eltSize + chunkOffset;
+            cePutTask->peerWinHost = task->recvWin;
+            bool isLastChunk = (chunkIdx == numChunks - 1);
+            if (isLastChunk) {
+              cePutTask->signalMode = NCCL_SIGNAL;
+            } else {
+              cePutTask->signalMode = NCCL_SIGNAL_NONE;
+            }
+            ncclIntruQueueEnqueue(&curBatch->cePutQueue, cePutTask);
+            curBatch->nCePut++;
+          }
+        }
 
         // Phase 3: Other local ranks gather data to send to this rank
         for (int lr = 0; lr < sched.localRanks; lr++) {
           int localPeerRank = comm->localRankToRank[lr];
           if (localPeerRank == sched.rank) continue; // skip self
-          // Enqueue to curBatch->cePutQueue and curBatch->ceWaitSignalQueue
-          curBatch->nCePut++;
+          
           curBatch->nCeWaitSignal = 1;
         }
       }
