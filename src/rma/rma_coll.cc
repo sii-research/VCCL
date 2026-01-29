@@ -268,8 +268,12 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
               cePutTask->peer = sendRank;
               cePutTask->peerWinOffset = task->recvWinOffset + rdisp * sched.eltSize + chunkOffset;
               cePutTask->peerWinHost = task->recvWin;
-              cePutTask->signalMode = NCCL_SIGNAL;
-
+              bool isLastChunk = (chunkIdx == numChunks - 1);
+              if (isLastChunk) {
+                cePutTask->signalMode = NCCL_SIGNAL;
+              } else {
+                cePutTask->signalMode = NCCL_SIGNAL_NONE;
+              }
               ncclIntruQueueEnqueue(&curBatch->cePutQueue, cePutTask);
               curBatch->nCePut++;
             }
@@ -333,7 +337,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           // TODO: Create ncclTaskRma for phase 2 (local distribution from recvRankSameRail)
           // TODO: Create ncclTaskRma for phase 3 (local gathering to rank)
           // Enqueue to curBatch->cePutQueue and curBatch->ceWaitSignalQueue
-          curBatch->nCePut = 1;
+          curBatch->nCePut++;
           curBatch->nCeWaitSignal = 1;
         }
       }
@@ -387,15 +391,50 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
         // Phase 4: rank --> all ranks on sendNode (same rail, interNode)
         {
+          size_t relayHalfBytes = 0;
+          if (task->recvWinOffset > task->relayWinOffset) {
+            relayHalfBytes = (task->recvWinOffset - task->relayWinOffset) / 2;
+          }
+          size_t relayToggleOffset = (batchIdx & 1) ? relayHalfBytes : 0;
           for (int lr = 0; lr < comm->nodeRanks[sendNode].localRanks; lr++) {
             int targetRank = comm->nodeRanks[sendNode].localRankToRank[lr];
-            // TODO: Create ncclTaskRma for sending to targetRank
-            // Enqueue to curBatch->proxyPutQueue
-            curBatch->nProxyPut = 1;
+            size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + targetRank];
+            if (sendCount > 0) {
+              size_t sdisp = task->sdispls[sched.rank * sched.nRanks + targetRank];
+              size_t totalBytes = sendCount * sched.eltSize;
+              int numChunks = 1;
+              if (totalBytes > sched.chunkSize) {
+                numChunks = (totalBytes + sched.chunkSize - 1) / sched.chunkSize;
+              }
+              for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+                size_t chunkOffset = chunkIdx * sched.chunkSize;
+                size_t chunkBytes = std::min(sched.chunkSize, totalBytes - chunkOffset);
+
+                struct ncclTaskRma* proxyPutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+                proxyPutTask->func = ncclFuncPutSignal;
+                proxyPutTask->ctx = 0;
+                proxyPutTask->count = chunkBytes / sched.eltSize;
+                proxyPutTask->datatype = task->datatype;
+                proxyPutTask->bytes = chunkBytes;
+                proxyPutTask->srcWinOffset = task->sendWinOffset + sdisp * sched.eltSize + chunkOffset;
+                proxyPutTask->srcWinHost = task->sendWin;
+                proxyPutTask->peer = sendRankSameRail;
+                proxyPutTask->peerWinOffset = task->relayWinOffset + relayToggleOffset + sdisp * sched.eltSize + chunkOffset;
+                proxyPutTask->peerWinHost = task->relayWin;
+                bool isLastChunk = (chunkIdx == numChunks - 1);
+                if (isLastChunk) {
+                  proxyPutTask->signalMode = NCCL_SIGNAL;
+                } else {
+                  proxyPutTask->signalMode = NCCL_SIGNAL_NONE;
+                }
+                ncclIntruQueueEnqueue(&curBatch->proxyPutQueue, proxyPutTask);
+                curBatch->nProxyPut++;
+              }
+            }
           }
         }
       }
-      
+
       curBatch->total = curBatch->nProxyPut + curBatch->nProxyWaitSignal + 
                        curBatch->nCePut + curBatch->nCeWaitSignal;
       // Move to next batch
