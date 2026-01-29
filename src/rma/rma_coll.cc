@@ -412,9 +412,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         }
       }
 
-      // ==================================================================
       // Proxy Part: interNode communication for NEXT nodeRound
-      // ==================================================================
       int proxyNodeIdx = batchIdx + 1;
       if (proxyNodeIdx < sched.nValidNodeRounds) {
         int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx] + 1;
