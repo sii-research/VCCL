@@ -20,6 +20,7 @@
 #if CUDART_VERSION >= 11030
 #include <cuda.h>
 #include "cudawrap.h"
+#include "mem_allocator.h"
 #endif
 
 uint64_t clockNano(); // from utils.h with which we have a circular dependency
@@ -30,6 +31,11 @@ template<>
 constexpr size_t ncclSizeOfT<void>() { return 1; }
 
 #if CUDART_VERSION >= 12020
+
+inline MemAllocator &getMemAllocatorInstance() {
+  static MemAllocator allocator;
+  return allocator;
+}
 
 static inline ncclResult_t ncclCuMemHostAlloc(void** ptr, CUmemGenericAllocationHandle *handlep, size_t size) {
   ncclResult_t result = ncclSuccess;
@@ -335,7 +341,8 @@ ncclResult_t ncclCudaCallocAsyncDebug(T** ptr, size_t nelem, cudaStream_t stream
   CUDACHECK(cudaThreadExchangeStreamCaptureMode(&mode));
   if (nelem > 0) {
     if (ncclCuMemEnable()) {
-      NCCLCHECKGOTO(ncclCuMemAlloc((void **)ptr, NULL, ncclCuMemHandleType, nelem*ncclSizeOfT<T>()), result, finish);
+      MemAllocator &allocator = getMemAllocatorInstance();
+      NCCLCHECKGOTO(allocator.cuCallocAsync((void **)ptr, NULL, ncclCuMemHandleType, nelem * ncclSizeOfT<T>()), result, finish);
     } else {
       CUDACHECKGOTO(cudaMalloc(ptr, nelem*ncclSizeOfT<T>()), result, finish);
     }
@@ -383,7 +390,12 @@ ncclResult_t ncclCudaFree(T* ptr) {
   TRACE(NCCL_ALLOC, "Cuda Free pointer %p", ptr);
   CUDACHECK(cudaThreadExchangeStreamCaptureMode(&mode));
   if (ncclCuMemEnable()) {
-    NCCLCHECKGOTO(ncclCuMemFree((void *)ptr), result, finish);
+    MemAllocator &allocator = getMemAllocatorInstance();
+    if (allocator.ownsPointer(ptr)) {
+      NCCLCHECKGOTO(allocator.releaseMem(ptr), result, finish);
+    } else {
+      NCCLCHECKGOTO(ncclCuMemFree((void *)ptr), result, finish);
+    }
   } else {
     CUDACHECKGOTO(cudaFree(ptr), result, finish);
   }
