@@ -197,6 +197,8 @@ extern int ncclIbBackupDevs[32];
 
 NCCL_PARAM(NetOptionalRecvCompletion, "NET_OPTIONAL_RECV_COMPLETION", 1);
 
+extern int64_t ncclParamLowMemoryMode();
+
 static_assert(sizeof(ncclNetHandle_t) + sizeof(int) <= CONNECT_SIZE, "Not large enough ncclConnect to hold ncclNetHandle_t and useGdr flag");
 // Forward declaration
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args);
@@ -585,7 +587,7 @@ static ncclResult_t sharedNetBuffersInit(struct ncclProxyState* proxyState, int 
 
   if (size) *size = state->size;
 
-  if (cuda && state->cudaBuff == NULL) {
+  if (cuda && state->cudaBuff == NULL && !ncclParamLowMemoryMode()) {
     if (sameProcess == 0 || ncclCuMemEnable()) {
       NCCLCHECK(ncclP2pAllocateShareableBuffer(state->size, 0, &state->ipcDesc, (void**)&state->cudaBuff));
     } else {
@@ -827,8 +829,12 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
 
   if (resources->shared == 0) { // Only allocate dedicated buffers for ring/tree, not for p2p
     for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) {
-      NCCL_NET_MAP_ADD_POINTER(map, 0, p!= NCCL_PROTO_LL && resources->useGdr ? 1 : 0, proxyState->buffSizes[p], buffs[p]);
-      resources->buffSizes[p] = proxyState->buffSizes[p];
+      if (ncclParamLowMemoryMode()){
+        resources->buffSizes[p] = 0;
+      } else {
+        NCCL_NET_MAP_ADD_POINTER(map, 0, p!= NCCL_PROTO_LL && resources->useGdr ? 1 : 0, proxyState->buffSizes[p], buffs[p]);
+        resources->buffSizes[p] = proxyState->buffSizes[p];
+      }
     }
   } else {
     // Get shared buffers
@@ -837,14 +843,19 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
     NCCLCHECK(sharedNetBuffersInit(
           proxyState, resources->useGdr, resources->tpLocalRank, 0, map->sameProcess, proxyState->p2pnChannels,
           &mapMem->gpuPtr, &mapMem->cpuPtr, &mapMem->size, &mapMem->ipcDesc));
-    resources->buffSizes[NCCL_PROTO_SIMPLE] = mapMem->size;
-
-    if (proxyState->allocP2pNetLLBuffers) {
-      NCCL_NET_MAP_ADD_POINTER(map, 0, 0 /*p == NCCL_PROTO_LL*/, proxyState->buffSizes[NCCL_PROTO_LL], buffs[NCCL_PROTO_LL]);
-      resources->buffSizes[NCCL_PROTO_LL] = proxyState->buffSizes[NCCL_PROTO_LL];
+    if (ncclParamLowMemoryMode()){
+      resources->buffSizes[NCCL_PROTO_SIMPLE] = 0;
+    } else {
+      resources->buffSizes[NCCL_PROTO_SIMPLE] = mapMem->size;
     }
 
-    NCCL_NET_MAP_ADD_POINTER(map, 1, resources->useGdr ? 1 : 0, mapMem->size, buffs[NCCL_PROTO_SIMPLE]);
+    if (proxyState->allocP2pNetLLBuffers && !ncclParamLowMemoryMode()) {
+      NCCL_NET_MAP_ADD_POINTER(map, 0, 0 /*p == NCCL_PROTO_LL*/, proxyState->buffSizes[NCCL_PROTO_LL], buffs[NCCL_PROTO_LL]);
+      resources->buffSizes[NCCL_PROTO_LL] = proxyState->buffSizes[NCCL_PROTO_LL];
+    } else {
+      resources->buffSizes[NCCL_PROTO_LL] = 0;
+    }
+    if (!ncclParamLowMemoryMode()) NCCL_NET_MAP_ADD_POINTER(map, 1, resources->useGdr ? 1 : 0, mapMem->size, buffs[NCCL_PROTO_SIMPLE]);
   }
 
   NCCL_NET_MAP_ADD_POINTER(map, 0, 0, sizeof(struct ncclSendMem), sendMem);
@@ -897,7 +908,7 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
 #if CUDA_VERSION >= 11070
       /* DMA-BUF support */
       int type = NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST;
-      if (type == NCCL_PTR_CUDA && resources->useDmaBuf) {
+      if ((type == NCCL_PTR_CUDA && resources->useDmaBuf) && !ncclParamLowMemoryMode()) {
         int dmabuf_fd;
         CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p], CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
         NCCLCHECK(proxyState->ncclNet->regMrDmaBuf(resources->netSendComm, resources->buffers[p], resources->buffSizes[p], type, 0ULL, dmabuf_fd, &resources->mhandles[p]));
@@ -905,7 +916,7 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
       } else // FALL-THROUGH to nv_peermem GDR path
 #endif
       {
-        NCCLCHECK(proxyState->ncclNet->regMr(resources->netSendComm, resources->buffers[p], resources->buffSizes[p], NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST, &resources->mhandles[p]));
+        if (!ncclParamLowMemoryMode()) NCCLCHECK(proxyState->ncclNet->regMr(resources->netSendComm, resources->buffers[p], resources->buffSizes[p], NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST, &resources->mhandles[p]));
       }
 
       // Copy the mhandle dptr, if implemented
@@ -983,9 +994,13 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
 
   if (resources->shared == 0) { // Only allocate dedicated buffers for ring/tree, not for p2p
     for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) {
-      NCCL_NET_MAP_ADD_POINTER(map, 0, resources->useGdr ? 1 : 0, proxyState->buffSizes[p], buffs[p]);
-      resources->buffSizes[p] = proxyState->buffSizes[p];
+      if (ncclParamLowMemoryMode()){
+        resources->buffSizes[p] = 0;
+      } else {
+        NCCL_NET_MAP_ADD_POINTER(map, 0, resources->useGdr ? 1 : 0, proxyState->buffSizes[p], buffs[p]);
+        resources->buffSizes[p] = proxyState->buffSizes[p];
     }
+  }
   } else {
     // Get shared buffers
     int bank = resources->useGdr ? NCCL_NET_MAP_SHARED_DEVMEM : NCCL_NET_MAP_SHARED_HOSTMEM;
@@ -993,16 +1008,22 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
     NCCLCHECK(sharedNetBuffersInit(
           proxyState, resources->useGdr, resources->tpLocalRank, 1, 1, proxyState->p2pnChannels,
           &mapMem->gpuPtr, &mapMem->cpuPtr, &mapMem->size, NULL));
-    resources->buffSizes[NCCL_PROTO_SIMPLE] = mapMem->size;
-    NCCL_NET_MAP_ADD_POINTER(map, 1, resources->useGdr ? 1 : 0, mapMem->size, buffs[NCCL_PROTO_SIMPLE]);
+    if (ncclParamLowMemoryMode()){
+      resources->buffSizes[NCCL_PROTO_SIMPLE] = 0;
+    } else {
+      resources->buffSizes[NCCL_PROTO_SIMPLE] = mapMem->size;
+      NCCL_NET_MAP_ADD_POINTER(map, 1, resources->useGdr ? 1 : 0, mapMem->size, buffs[NCCL_PROTO_SIMPLE]);
+    }
   }
 
   NCCL_NET_MAP_ADD_POINTER(map, 0, 0, sizeof(struct ncclSendMem), sendMem);
   NCCL_NET_MAP_ADD_POINTER(map, 0, 0, sizeof(struct ncclRecvMem), recvMem);
 
-  if (proxyState->allocP2pNetLLBuffers) {
+  if (proxyState->allocP2pNetLLBuffers && !ncclParamLowMemoryMode()) {
     NCCL_NET_MAP_ADD_POINTER(map, 0, 0 /*devMem*/, proxyState->buffSizes[NCCL_PROTO_LL], buffs[NCCL_PROTO_LL]);
     resources->buffSizes[NCCL_PROTO_LL] = proxyState->buffSizes[NCCL_PROTO_LL];
+  } else {
+    resources->buffSizes[NCCL_PROTO_LL] = 0;
   }
 
   if (map->mems[NCCL_NET_MAP_DEVMEM].size) {
@@ -1041,7 +1062,7 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
 #if CUDA_VERSION >= 11070
       /* DMA-BUF support */
       int type = NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST;
-      if (type == NCCL_PTR_CUDA && resources->useDmaBuf) {
+      if ((type == NCCL_PTR_CUDA && resources->useDmaBuf) && !ncclParamLowMemoryMode()) {
         int dmabuf_fd;
         CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p], CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
         NCCLCHECK(proxyState->ncclNet->regMrDmaBuf(resources->netRecvComm, resources->buffers[p], resources->buffSizes[p], type, 0ULL, dmabuf_fd, &resources->mhandles[p]));
@@ -1049,7 +1070,7 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
       } else // FALL-THROUGH to nv_peermem GDR path
 #endif
       {
-        NCCLCHECK(proxyState->ncclNet->regMr(resources->netRecvComm, resources->buffers[p], resources->buffSizes[p], NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST, &resources->mhandles[p]));
+        if(!ncclParamLowMemoryMode()) NCCLCHECK(proxyState->ncclNet->regMr(resources->netRecvComm, resources->buffers[p], resources->buffSizes[p], NCCL_NET_MAP_DEV_MEM(map, buffs[p]) ? NCCL_PTR_CUDA : NCCL_PTR_HOST, &resources->mhandles[p]));
       }
 
       // Copy the mhandle dptr
