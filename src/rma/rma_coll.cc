@@ -260,13 +260,13 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         int* peerRanks = ncclMemoryStackAlloc<int>(&comm->memScoped, sched.localRanks);
         int nPeersWithSignals = 0;
 
-        for (int round = 0; round < sched.localRanks; round++) {
-          int sendRank = comm->localRankToRank[(sched.localRank + round) % sched.localRanks];
-          int recvRank = comm->localRankToRank[(sched.localRank - round + sched.localRanks) % sched.localRanks];
+        for (int lr = 0; lr < sched.localRanks; lr++) {
+          int sendRank = comm->localRankToRank[(sched.localRank + lr) % sched.localRanks];
+          // Send part: sched.rank --> sendRank
           size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + sendRank];
           if (sendCount > 0) {
             size_t sdisp = task->sdispls[sched.rank * sched.nRanks + sendRank];
-            size_t rdisp = task->rdispls[recvRank * sched.nRanks + sched.rank];
+            size_t rdisp = task->rdispls[sendRank * sched.nRanks + sched.rank];
             size_t totalBytes = sendCount * sched.eltSize;
             int numChunks = 1;
             if (totalBytes > sched.chunkSize) {
@@ -298,7 +298,8 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
             }
           }
 
-          // Recv part: rank receives from recvRank
+          // Recv part: sched.rank <-- recvRank
+          int recvRank = comm->localRankToRank[(sched.localRank - lr + sched.localRanks) % sched.localRanks];
           size_t recvCount = task->recvcounts[sched.rank * sched.nRanks + recvRank];
           if (recvCount > 0) {
             // Record this peer and its signal count
@@ -306,6 +307,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
             peerSignalCounts[nPeersWithSignals] = 1;
             nPeersWithSignals++;
           }
+          break;
         }
 
         // Create ONE consolidated wait task for all signals in this batch
