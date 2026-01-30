@@ -321,7 +321,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         }
       } else {
         // Batch N>0: nodeRound N's phase 2+3 (cross-rail intraNode)
-        int ceNodeDelta = sched.validNodeDeltas[batchIdx] + 1;
+        int ceNodeDelta = sched.validNodeDeltas[batchIdx];
         int ceRecvNode = (sched.node - ceNodeDelta + sched.nNodes) % sched.nNodes;
         int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
 
