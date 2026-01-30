@@ -522,6 +522,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       }
       curBatch = curBatch->next;
     }
+    planner->nTasksRmaColl -= 1;
     plan->rmaCollArgs->nBatches = nValidBatches;
     if (sched.validNodeDeltas) free(sched.validNodeDeltas);
   }
