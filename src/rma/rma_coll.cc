@@ -13,6 +13,19 @@
 
 typedef ncclResult_t (*NcclRmaFunc_t)(struct ncclComm*, ncclRmaWork*, cudaStream_t);
 
+static ncclResult_t ncclRmaCollInit(struct ncclComm* comm) {
+	struct ncclRmaCollState* st = &comm->rmaCollState;
+  for (int i = 0; i < NCCL_RMA_COLL_MAX_STREAMS; i++) {
+    if (st->rmaCollStream[i] == nullptr) {
+      CUDACHECK(cudaStreamCreateWithFlags(&st->rmaCollStream[i], cudaStreamNonBlocking));
+    }
+    if (st->rmaCollEvent[i] == nullptr) {
+      CUDACHECK(cudaEventCreateWithFlags(&st->rmaCollEvent[i], cudaEventDisableTiming));
+    }
+  }
+  return ncclSuccess;
+}
+
 // Helper function to launch RMA operations with proper stream management
 // - If opCnt == 0: launch on mainStream (first operation)
 // - If opCnt > 0: launch on rmaCollStream with event synchronization
@@ -86,6 +99,7 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
   struct ncclRmaCollState* rmaCollState = &comm->rmaCollState;
   struct ncclRmaArgs* rmaArgs = nullptr;
   NCCLCHECK(ncclCalloc(&rmaArgs, 1));
+	NCCLCHECK(ncclRmaCollInit(comm));
 
   // Iterate through each RMA work batch
   struct ncclRmaWorkBatch* batch = ncclIntruQueueHead(&plan->rmaWorkBatchQueue);
@@ -162,6 +176,10 @@ static ncclResult_t allocRmaWorkBatch(struct ncclComm* comm, struct ncclRmaWorkB
   batch->nCePut = 0;
   batch->nCeWaitSignal = 0;
   batch->total = 0;
+  ncclIntruQueueConstruct(&batch->proxyPutQueue);
+  ncclIntruQueueConstruct(&batch->proxyWaitSignalQueue);
+  ncclIntruQueueConstruct(&batch->cePutQueue);
+  ncclIntruQueueConstruct(&batch->ceWaitSignalQueue);
   *batchOut = batch;
   return ncclSuccess;
 }
@@ -217,6 +235,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
   struct ncclTaskRmaColl* task = ncclIntruQueueDequeue(&planner->collRmaTaskQueue);
 
   plan->isRmaColl = true;
+	ncclIntruQueueConstruct(&plan->rmaWorkBatchQueue);
   plan->rmaCollArgs = ncclMemoryStackAlloc<struct ncclRmaCollArgs>(&comm->memScoped);
   plan->rmaCollArgs->func = task->func;
   plan->rmaCollArgs->nBatches = 0;
@@ -242,12 +261,12 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         int nPeersWithSignals = 0;
 
         for (int round = 0; round < sched.localRanks; round++) {
-          int sendRank = comm->p2pSchedule[round].sendRank;
-          int recvRank = comm->p2pSchedule[round].recvRank;
+          int sendRank = comm->localRankToRank[(sched.localRank + round) % sched.localRanks];
+          int recvRank = comm->localRankToRank[(sched.localRank - round + sched.localRanks) % sched.localRanks];
           size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + sendRank];
           if (sendCount > 0) {
             size_t sdisp = task->sdispls[sched.rank * sched.nRanks + sendRank];
-            size_t rdisp = task->rdispls[sendRank * sched.nRanks + sched.rank];
+            size_t rdisp = task->rdispls[recvRank * sched.nRanks + sched.rank];
             size_t totalBytes = sendCount * sched.eltSize;
             int numChunks = 1;
             if (totalBytes > sched.chunkSize) {
@@ -280,7 +299,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           }
 
           // Recv part: rank receives from recvRank
-          size_t recvCount = task->recvcounts[recvRank * sched.nRanks + sched.rank];
+          size_t recvCount = task->recvcounts[sched.rank * sched.nRanks + recvRank];
           if (recvCount > 0) {
             // Record this peer and its signal count
             peerRanks[nPeersWithSignals] = recvRank;
@@ -308,14 +327,6 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           ceWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, nPeersWithSignals);
           memcpy(ceWaitTask->peers, peerRanks, nPeersWithSignals * sizeof(int));
           memcpy(ceWaitTask->nsignals, peerSignalCounts, nPeersWithSignals * sizeof(int));
-
-          // Calculate total for count field
-          int totalSignals = 0;
-          for (int i = 0; i < nPeersWithSignals; i++) {
-            totalSignals += peerSignalCounts[i];
-          }
-          ceWaitTask->count = totalSignals;
-
           ncclIntruQueueEnqueue(&curBatch->ceWaitSignalQueue, ceWaitTask);
           curBatch->nCeWaitSignal = 1; // Only one consolidated wait per batch
         }
