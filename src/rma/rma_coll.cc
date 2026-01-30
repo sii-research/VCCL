@@ -217,6 +217,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
   struct ncclTaskRmaColl* task = ncclIntruQueueDequeue(&planner->collRmaTaskQueue);
 
   plan->isRmaColl = true;
+  plan->rmaCollArgs = ncclMemoryStackAlloc<struct ncclRmaCollArgs>(&comm->memScoped);
   plan->rmaCollArgs->func = task->func;
   plan->rmaCollArgs->nBatches = 0;
 
@@ -230,7 +231,6 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
     // Calculate actual buffer addresses from window info
     void* sendBuff = (char*)task->sendWin->userPtr + task->sendWinOffset;
-    void* recvBuff = (char*)task->recvWin->userPtr + task->recvWinOffset;
 
     while (curBatch != nullptr) {
       // CE Part: intraNode communication

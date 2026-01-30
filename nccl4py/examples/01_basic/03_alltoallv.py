@@ -80,13 +80,28 @@ def main():
     send_total = sum(sendcounts_row)
     recv_total = sum(recvcounts_row)
 
-    # Create send/recv buffers
-    sendbuf = (torch.arange(send_total, device=device, dtype=torch.float32)
-               + rank * 1000.0)
-    recvbuf = torch.full((recv_total,), -1.0, device=device, dtype=torch.float32)
+    # Create one contiguous symmetric buffer: [send | relay | recv]
+    # Relay uses 2x max(send, recv) elements to match double-buffer use in RMA path.
+    relay_total = max(send_total, recv_total) * 2
+    total_elems = send_total + relay_total + recv_total
+    sym_buf = nccl.torch.empty(total_elems, device=device, dtype=torch.float32)
 
+    sendbuf = sym_buf[:send_total]
+    relaybuf = sym_buf[send_total:send_total + relay_total]
+    recvbuf = sym_buf[send_total + relay_total:]
+
+    # Initialize buffers
+    sendbuf.copy_(torch.arange(send_total, device=device, dtype=torch.float32) + rank * 1000.0)
+    relaybuf.fill_(0.0)
+    recvbuf.fill_(-1.0)
+
+    # Collectively register the symmetric window (all ranks must call this)
+    window = nccl_comm.register_window(sym_buf, flags=nccl.WindowFlag.CollSymmetric)
+    if window is None:
+        raise RuntimeError("register_window returned None; symmetric window registration failed")
+    print(f"Rank {rank} window: {window}")
     # [NCCL4Py] AlltoAllv
-    nccl_comm.alltoallv(sendbuf, recvbuf, sendcounts, sdispls, recvcounts, rdispls)
+    nccl_comm.alltoallv(sendbuf, recvbuf, sendcounts, sdispls, recvcounts, rdispls, relaybuf)
 
     torch.cuda.synchronize()
 
@@ -100,3 +115,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
