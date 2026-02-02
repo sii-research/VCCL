@@ -1190,6 +1190,8 @@ ncclResult_t ncclIbInitCommDevBase(int ibDevN, struct ncclIbNetCommDevBase* base
   return ncclSuccess;
 }
 
+ncclResult_t ncclIbDeregAllMrInternal(ncclIbNetCommDevBase* base);
+
 ncclResult_t ncclIbDestroyBase(struct ncclIbNetCommDevBase* base, bool if_backup) {
   ncclResult_t res;
   if(!if_backup) {
@@ -1201,6 +1203,8 @@ ncclResult_t ncclIbDestroyBase(struct ncclIbNetCommDevBase* base, bool if_backup
 
   pthread_mutex_lock(&ncclIbDevs[base->ibDevN].lock);
   if (0 == --ncclIbDevs[base->ibDevN].pdRefs) {
+    // Important: need to manually deregister all MRs to mitigate bug when enabling registered buffer
+    NCCLCHECK(ncclIbDeregAllMrInternal(base));
     NCCLCHECKGOTO(wrap_ibv_dealloc_pd(ncclIbDevs[base->ibDevN].pd), res, returning);
   }
   res = ncclSuccess;
@@ -2370,6 +2374,11 @@ ncclResult_t ncclIbDeregMrInternal(ncclIbNetCommDevBase* base, ibv_mr* mhandle) 
   struct ncclIbMrCache* cache = &ncclIbDevs[base->ibDevN].mrCache;
   ncclResult_t res;
   pthread_mutex_lock(&ncclIbDevs[base->ibDevN].lock);
+  if (cache->population == 0) {
+    // Nothing to deregister since we may already have deregistered all mrs
+    res = ncclSuccess;
+    goto returning;
+  }
   for (int i=0; i < cache->population; i++) {
     if (mhandle == cache->slots[i].mr) {
       if (0 == --cache->slots[i].refs) {
@@ -2389,6 +2398,25 @@ ncclResult_t ncclIbDeregMrInternal(ncclIbNetCommDevBase* base, ibv_mr* mhandle) 
   res = ncclInternalError;
 returning:
   pthread_mutex_unlock(&ncclIbDevs[base->ibDevN].lock);
+  return res;
+}
+
+ncclResult_t ncclIbDeregAllMrInternal(ncclIbNetCommDevBase* base) {
+  struct ncclIbMrCache* cache = &ncclIbDevs[base->ibDevN].mrCache;
+  ncclResult_t res;
+  for (int i=0; i < cache->population; i++) {
+    int deregRes = wrap_ibv_dereg_mr(cache->slots[i].mr);
+    if (deregRes != ncclSuccess) goto error;
+  }
+  free(cache->slots);
+  cache->slots = NULL;
+  cache->capacity = 0;
+  cache->population = 0;
+  res = ncclSuccess;
+  return res;
+error:
+  WARN("NET/IB: could not deregister all mrs on ibDevN %d", base->ibDevN);
+  res = ncclInternalError;
   return res;
 }
 

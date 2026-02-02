@@ -84,9 +84,11 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
     struct ncclRegNetHandles* netHandle = reg->netHandleHead;
     struct ncclRegNetHandles* netHandlePrev;
     while(netHandle) {
-      if (ncclNetDeregBuffer(comm, netHandle->proxyConn, netHandle->handle) != ncclSuccess) {
+      /*if (ncclNetDeregBuffer(comm, netHandle->proxyConn, netHandle->handle) != ncclSuccess) {
         WARN("rank %d deregister NET buffer handle %p proxy rank %d failed\n", comm->rank, netHandle->handle, netHandle->proxyConn->rank);
-      }
+      }*/
+    
+      // Since we deregister buffer directly in Proxy and the proxy may not have already exists, we don't need to double dereg.
       netHandlePrev = netHandle;
       netHandle = netHandle->next;
       free(netHandlePrev);
