@@ -13,6 +13,57 @@
 
 typedef ncclResult_t (*NcclRmaFunc_t)(struct ncclComm*, ncclRmaWork*, cudaStream_t);
 
+// Helper function to dump RMA task queue
+static void dumpRmaTaskQueue(const char* name,
+                             struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next>* queue) {
+  int count = 0;
+  struct ncclTaskRma* task = ncclIntruQueueHead(queue);
+  while (task != nullptr) {
+    count++;
+    task = task->next;
+  }
+  printf("  %s: %d\n", name, count);
+  task = ncclIntruQueueHead(queue);
+  while (task != nullptr) {
+    printf("    Task: func=%s(%d) ctx=%d count=%zu dtype=%s bytes=%zu peer=%d signal=%d npeers=%d\n",
+           ncclFuncToString(task->func), task->func, task->ctx, task->count,
+           ncclDatatypeToString(task->datatype), task->bytes, task->peer,
+           task->signalMode, task->npeers);
+    printf("      srcBuff=%p srcWinHost=%p srcWinOffset=%zu\n",
+           task->srcBuff, task->srcWinHost, task->srcWinOffset);
+    printf("      peerWinHost=%p peerWinOffset=%zu\n",
+           task->peerWinHost, task->peerWinOffset);
+    if (task->npeers > 0 && task->peers && task->nsignals) {
+      printf("      peers/nsignals:");
+      for (int i = 0; i < task->npeers; i++) {
+        printf(" (%d,%d)", task->peers[i], task->nsignals[i]);
+      }
+      printf("\n");
+    }
+    task = task->next;
+  }
+}
+
+// Helper function to dump RMA work batch
+static ncclResult_t dumpRmaWorkBatch(struct ncclRmaWorkBatch* batch, int rank) {
+  if (batch == nullptr) {
+    printf("RMA Work Batch: NULL\n");
+    return ncclSuccess;
+  }
+
+  printf("RMA Work Batch: %p (rank=%d)\n", batch, rank);
+  printf("  next: %p\n", batch->next);
+  printf("  nProxyPut=%d nProxyWaitSignal=%d nCePut=%d nCeWaitSignal=%d total=%d\n",
+         batch->nProxyPut, batch->nProxyWaitSignal, batch->nCePut, batch->nCeWaitSignal, batch->total);
+
+  dumpRmaTaskQueue("proxyPutQueue", &batch->proxyPutQueue);
+  dumpRmaTaskQueue("proxyWaitSignalQueue", &batch->proxyWaitSignalQueue);
+  dumpRmaTaskQueue("cePutQueue", &batch->cePutQueue);
+  dumpRmaTaskQueue("ceWaitSignalQueue", &batch->ceWaitSignalQueue);
+
+  return ncclSuccess;
+}
+
 static ncclResult_t ncclRmaCollInit(struct ncclComm* comm) {
 	struct ncclRmaCollState* st = &comm->rmaCollState;
   for (int i = 0; i < NCCL_RMA_COLL_MAX_STREAMS; i++) {
@@ -104,6 +155,11 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
   // Iterate through each RMA work batch
   struct ncclRmaWorkBatch* batch = ncclIntruQueueHead(&plan->rmaWorkBatchQueue);
   while (batch != nullptr) {
+    /* For debugging: dump RMA work batch
+    if (comm->rank != 0) {
+      dumpRmaWorkBatch(batch, comm->rank);
+    }
+    */
     int opCnt = 0;  // Counter for number of operations launched in this batch
 
     // Launch the four types of RMA operations in parallel:
@@ -260,13 +316,13 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         int* peerRanks = ncclMemoryStackAlloc<int>(&comm->memScoped, sched.localRanks);
         int nPeersWithSignals = 0;
 
-        for (int round = 0; round < sched.localRanks; round++) {
-          int sendRank = comm->localRankToRank[(sched.localRank + round) % sched.localRanks];
-          int recvRank = comm->localRankToRank[(sched.localRank - round + sched.localRanks) % sched.localRanks];
+        for (int lr = 0; lr < sched.localRanks; lr++) {
+          int sendRank = comm->localRankToRank[(sched.localRank + lr) % sched.localRanks];
+          // Send part: sched.rank --> sendRank
           size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + sendRank];
           if (sendCount > 0) {
             size_t sdisp = task->sdispls[sched.rank * sched.nRanks + sendRank];
-            size_t rdisp = task->rdispls[recvRank * sched.nRanks + sched.rank];
+            size_t rdisp = task->rdispls[sendRank * sched.nRanks + sched.rank];
             size_t totalBytes = sendCount * sched.eltSize;
             int numChunks = 1;
             if (totalBytes > sched.chunkSize) {
@@ -298,7 +354,8 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
             }
           }
 
-          // Recv part: rank receives from recvRank
+          // Recv part: sched.rank <-- recvRank
+          int recvRank = comm->localRankToRank[(sched.localRank - lr + sched.localRanks) % sched.localRanks];
           size_t recvCount = task->recvcounts[sched.rank * sched.nRanks + recvRank];
           if (recvCount > 0) {
             // Record this peer and its signal count
@@ -323,8 +380,8 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
           // Use stack alloc for peers and nsignals arrays
           ceWaitTask->npeers = nPeersWithSignals;
-          ceWaitTask->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, nPeersWithSignals);
-          ceWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, nPeersWithSignals);
+          ceWaitTask->peers = ncclMemoryStackAlloc<int>(&comm->memPermanent, nPeersWithSignals);
+          ceWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memPermanent, nPeersWithSignals);
           memcpy(ceWaitTask->peers, peerRanks, nPeersWithSignals * sizeof(int));
           memcpy(ceWaitTask->nsignals, peerSignalCounts, nPeersWithSignals * sizeof(int));
           ncclIntruQueueEnqueue(&curBatch->ceWaitSignalQueue, ceWaitTask);
