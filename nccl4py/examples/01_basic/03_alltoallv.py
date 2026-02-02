@@ -66,13 +66,11 @@ def main():
 
     send_total = sum(sendcounts[rank * nranks : (rank + 1) * nranks])
     recv_total = sum(recvcounts[rank * nranks : (rank + 1) * nranks])
-    relay_total = max(send_total, recv_total) * 2
-    total_elems = send_total + relay_total + recv_total
+    relay_total = 1024 * 1024  # brutely make it large enough. FIXME
 
-    sym_buf = nccl.torch.empty(total_elems, device=device, dtype=torch.float32)
-    sendbuf = sym_buf[:send_total]
-    relaybuf = sym_buf[send_total : send_total + relay_total]
-    recvbuf = sym_buf[send_total + relay_total :]
+    sendbuf = nccl.torch.empty(send_total, device=device, dtype=torch.float32)
+    recvbuf = nccl.torch.empty(recv_total, device=device, dtype=torch.float32)
+    relaybuf = nccl.torch.empty(relay_total, device=device, dtype=torch.float32)
 
     # Fill send data: encode source rank + global offset for easy validation
     for p in range(nranks):
@@ -92,7 +90,13 @@ def main():
         print("rdispls:", _fmt_rows(rdispls, nranks))
     print(f"Rank {rank}: sendbuf:", sendbuf.cpu().tolist())
 
-    window = nccl_comm.register_window(sym_buf, flags=nccl.WindowFlag.CollSymmetric)
+    window = nccl_comm.register_window(sendbuf, flags=nccl.WindowFlag.CollSymmetric)
+    if window is None:
+        raise RuntimeError("register_window returned None")
+    window = nccl_comm.register_window(recvbuf, flags=nccl.WindowFlag.CollSymmetric)
+    if window is None:
+        raise RuntimeError("register_window returned None")
+    window = nccl_comm.register_window(relaybuf, flags=nccl.WindowFlag.CollSymmetric)
     if window is None:
         raise RuntimeError("register_window returned None")
 
