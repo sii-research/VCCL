@@ -18,6 +18,7 @@
 #include "graph.h"
 #include "profiler.h"
 #include <atomic>
+#include "device/sync_kernel.h"
 
 #if CUDART_VERSION < 9000
 struct cudaLaunchParams {
@@ -281,10 +282,10 @@ struct ncclKernelPlan {
   struct psmSyncCondition* syncCondition;
 };
 
-struct psmSyncCondition {
-  std::atomic<int> proxyOpCount;    // The total number of proxyOp's that have been enqueued in this plan.
-  std::atomic<int> proxyReadyEvent; // Event that proxy thread queries for starting progresssing.
-};
+// struct psmSyncCondition {
+//   std::atomic<int> proxyOpCount;    // The total number of proxyOp's that have been enqueued in this plan.
+//   std::atomic<int> proxyReadyEvent; // Event that proxy thread queries for starting progresssing.
+// };
 
 ////////////////////////////////////////////////////////////////////////////////
 // Roughly sorts ncclTaskColl's by their size descending. This structure is

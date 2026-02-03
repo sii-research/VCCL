@@ -826,7 +826,8 @@ static void computeChunksize(struct ncclProxySubArgs* sub) {
 }
 
 static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_SEQ_CST)) return ncclSuccess;
+  __sync_synchronize();
   if (args->reg) {
     if (args->state == ncclProxyOpReady) {
       int readyCnt = 0;
@@ -876,7 +877,9 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
       }
       if (args->done == args->nsubs) {
         args->state = ncclProxyOpNone;
-        args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+        //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+        __sync_synchronize();
+        __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_SEQ_CST);
       } else {
         args->idle = 1;
       }
@@ -947,7 +950,9 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
       }
       if (args->done == args->nsubs) {
         args->state = ncclProxyOpNone;
-        args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+        //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+        __sync_synchronize();
+        __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_SEQ_CST);
       }
     }
     return ncclSuccess;
@@ -955,7 +960,8 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
 }
 
 static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
-  if(!(args->syncCond->proxyReadyEvent.load(std::memory_order_acquire))) return ncclSuccess;
+  if (!__atomic_load_n(&(args->syncCond->proxyReadyEvent), __ATOMIC_SEQ_CST)) return ncclSuccess;
+  __sync_synchronize();
   if (args->reg) {
     if (args->state == ncclProxyOpReady) {
       for (int s=0; s<args->nsubs; s++) {
@@ -985,7 +991,9 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
         }
         if (args->done == args->nsubs) {
           args->state = ncclProxyOpNone;
-          args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+          //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+          __sync_synchronize();
+          __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_SEQ_CST);
         } else {
           args->idle = 1;
         }
@@ -1053,7 +1061,9 @@ static ncclResult_t psmP2pRecvProxyProgress(struct ncclProxyState* proxyState, s
       }
       if (args->done == args->nsubs) {
         args->state = ncclProxyOpNone;
-        args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+        //args->syncCond->proxyOpCount.fetch_sub(args->nsubs);
+        __sync_synchronize();
+        __atomic_fetch_sub(&(args->syncCond->proxyOpCount), args->nsubs, __ATOMIC_SEQ_CST);
       }
     }
     return ncclSuccess;
