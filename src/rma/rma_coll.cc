@@ -485,15 +485,12 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
       if (proxyNodeIdx < sched.nValidNodeRounds) {
         int proxyNodeDelta = sched.validNodeDeltas[proxyNodeIdx];
 
-        int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
-        int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
-        int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
-        int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
-
-        // Phase 1: recvRankSameRail --> rank (same rail, interNode)
+        // Phase 1: sched.rank <-- recvRankSameRail (same rail, interNode)
         {
           // Create ncclTaskRma for receiving from recvRankSameRail
           // Enqueue to curBatch->proxyWaitSignalQueue
+          int recvNode = (sched.node - proxyNodeDelta + sched.nNodes) % sched.nNodes;
+          int recvRankSameRail = comm->nodeRanks[recvNode].localRankToRank[sched.localRank];
           int nSignalsFromRecvRankSameRail = 0;
           for (int lr = 0; lr < sched.localRanks; lr++) {
             int destRank = comm->nodeRanks[sched.node].localRankToRank[lr];
@@ -515,18 +512,19 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
             proxyWaitTask->signalMode = NCCL_SIGNAL;
 
             proxyWaitTask->npeers = 1;
-            proxyWaitTask->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
-            proxyWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, 1);
+            proxyWaitTask->peers = ncclMemoryStackAlloc<int>(&comm->memPermanent, 1);
+            proxyWaitTask->nsignals = ncclMemoryStackAlloc<int>(&comm->memPermanent, 1);
             proxyWaitTask->peers[0] = recvRankSameRail;
             proxyWaitTask->nsignals[0] = nSignalsFromRecvRankSameRail;
-            proxyWaitTask->count = nSignalsFromRecvRankSameRail;
             ncclIntruQueueEnqueue(&curBatch->proxyWaitSignalQueue, proxyWaitTask);
             curBatch->nProxyWaitSignal=1; // Only one per batch
           }
         }
 
-        // Phase 4: rank --> all ranks on sendNode (same rail, interNode)
+        // Phase 4: sched.rank --> all ranks on sendNode (same rail, interNode)
         {
+          int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
+          int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
           size_t relayHalfBytes = 0;
           if (task->recvWinOffset > task->relayWinOffset) {
             relayHalfBytes = (task->recvWinOffset - task->relayWinOffset) / 2;
@@ -537,6 +535,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
             size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + targetRank];
             if (sendCount > 0) {
               size_t sdisp = task->sdispls[sched.rank * sched.nRanks + targetRank];
+              size_t rdisp = task->rdispls[targetRank * sched.nRanks + sched.rank];
               size_t totalBytes = sendCount * sched.eltSize;
               int numChunks = 1;
               if (totalBytes > sched.chunkSize) {
@@ -556,7 +555,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
                 proxyPutTask->srcWinOffset = task->sendWinOffset + sdisp * sched.eltSize + chunkOffset;
                 proxyPutTask->srcWinHost = task->sendWin;
                 proxyPutTask->peer = sendRankSameRail;
-                proxyPutTask->peerWinOffset = receiverIsSameRailRank ? task->recvWinOffset +  sdisp * sched.eltSize + chunkOffset
+                proxyPutTask->peerWinOffset = receiverIsSameRailRank ? task->recvWinOffset +  rdisp * sched.eltSize + chunkOffset
                                               : task->relayWinOffset + relayToggleOffset + sdisp * sched.eltSize + chunkOffset;
                 proxyPutTask->peerWinHost = receiverIsSameRailRank ? task->recvWin : task->relayWin;
                 bool isLastChunk = (chunkIdx == numChunks - 1);

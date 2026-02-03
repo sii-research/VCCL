@@ -23,8 +23,11 @@ except ImportError:
     print("ERROR: PyTorch required. Install with: pip install torch")
     sys.exit(1)
 
-import nccl.core as nccl
-
+try:
+    import nccl.core as nccl
+except ImportError:
+    print("ERROR: nccl.core required.")
+    sys.exit(1)
 
 def prefix_sum(counts):
     """Return displacements [0, c0, c0+c1, ...] (length len(counts))."""
@@ -45,7 +48,8 @@ def main():
     rank = comm_mpi.Get_rank()
     nranks = comm_mpi.Get_size()
 
-    device = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
+    device_id = rank % torch.cuda.device_count()
+    device = torch.device(f"cuda:{device_id}")
     torch.cuda.set_device(device)
 
     unique_id = nccl.get_unique_id() if rank == 0 else None
@@ -66,11 +70,28 @@ def main():
 
     send_total = sum(sendcounts[rank * nranks : (rank + 1) * nranks])
     recv_total = sum(recvcounts[rank * nranks : (rank + 1) * nranks])
-    relay_total = 1024 * 1024  # brutely make it large enough. FIXME
 
-    sendbuf = nccl.torch.empty(send_total, device=device, dtype=torch.float32)
-    recvbuf = nccl.torch.empty(recv_total, device=device, dtype=torch.float32)
-    relaybuf = nccl.torch.empty(relay_total, device=device, dtype=torch.float32)
+    # brutely make it large enough FIXME
+    chunk_size = 1024 * 1024
+    relay_total = chunk_size * 2
+    sym_total = chunk_size * 4
+    elem_size = torch.empty(0, dtype=torch.float32).element_size()
+    sym_buf = nccl.mem_alloc(size=sym_total * elem_size, device=device_id)
+    window = nccl_comm.register_window(sym_buf, flags=nccl.WindowFlag.CollSymmetric)
+    if window is None:
+        raise RuntimeError("sym_buf register_window returned None")
+
+    # |                           sym_buf                            |
+    # |--- sendbuf ---|--- recvbuf ---|--------relaybuf--------------|
+    # |offset: 0      |off:chunk_size |offset: chunk_size*2          |
+    # |len:send_total |len:recv_total |len:chunk_size*2              |
+    send_offset = 0
+    recv_offset = chunk_size
+    relay_offset = chunk_size * 2
+    sym_tensor = torch.from_dlpack(sym_buf)
+    sendbuf = sym_tensor[send_offset : send_offset + send_total]
+    relaybuf = sym_tensor[relay_offset : relay_offset + relay_total]
+    recvbuf = sym_tensor[recv_offset : recv_offset + recv_total]
 
     # Fill send data: encode source rank + global offset for easy validation
     for p in range(nranks):
@@ -90,15 +111,6 @@ def main():
         print("rdispls:", _fmt_rows(rdispls, nranks))
     print(f"Rank {rank}: sendbuf:", sendbuf.cpu().tolist())
 
-    window = nccl_comm.register_window(sendbuf, flags=nccl.WindowFlag.CollSymmetric)
-    if window is None:
-        raise RuntimeError("register_window returned None")
-    window = nccl_comm.register_window(recvbuf, flags=nccl.WindowFlag.CollSymmetric)
-    if window is None:
-        raise RuntimeError("register_window returned None")
-    window = nccl_comm.register_window(relaybuf, flags=nccl.WindowFlag.CollSymmetric)
-    if window is None:
-        raise RuntimeError("register_window returned None")
 
     nccl_comm.alltoallv(sendbuf, recvbuf, sendcounts, sdispls, recvcounts, rdispls, relaybuf)
     torch.cuda.synchronize()
