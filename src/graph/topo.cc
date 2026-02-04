@@ -1521,8 +1521,9 @@ ncclResult_t ncclTopoSmartGetNet(struct ncclTopoSystem* system, int rank, int ch
     // suppose the 2 gpus are neighbor to each other
     for(int n = 0; n < localNetCount; n++) {
       if(gpu % localNetCount == n) {
-        *id = localNets[n];
-        *backupId = localNets[(n + 1) % localNetCount];
+        *id = system->nodes[NET].nodes[localNets[n]].id;
+        *backupId = system->nodes[NET].nodes[localNets[(n + 1) % localNetCount]].id;
+        break;
       }
     }
   }
