@@ -1231,6 +1231,7 @@ class Communicator:
         recvcounts: Sequence[int],
         rdispls: Sequence[int],
         relaybuf: NcclBufferSpec | None = None,
+        relaycount: int = 0,
         *,
         stream: NcclStreamSpec | None = None,
     ) -> None:
@@ -1245,6 +1246,7 @@ class Communicator:
         - recvcounts (Sequence[int]): Elements expected from each rank (length == nranks*nranks).
         - rdispls (Sequence[int]): Element displacements in recvbuf (length == nranks*nranks).
             - relaybuf (NcclBufferSpec | None): Optional relay buffer. Defaults to None.
+            - relaycount (int): Element count of relay buffer (e.g. 2 * nLocalRanks).
             - stream (NcclStreamSpec, optional): CUDA stream for the operation. Defaults to None.
 
         """
@@ -1266,6 +1268,10 @@ class Communicator:
             if relay.dtype != s.dtype:
                 raise NcclInvalid(
                     f"Dtype mismatch: relaybuf has dtype {relay.dtype}, expected {s.dtype}"
+                )
+            if relaycount <= 0 or relay.count < relaycount:
+                raise NcclInvalid(
+                    f"relaycount must be positive and relaybuf must have at least relaycount elements; got relaycount={relaycount}, relay.count={relay.count}"
                 )
 
         sendcounts_arr = _np.asarray(sendcounts, dtype=_np.int64)
@@ -1319,6 +1325,7 @@ class Communicator:
         r_displs = _np.ascontiguousarray(rdispls_arr, dtype=_np.uintp)
 
         relay_ptr = 0 if relay is None else relay.ptr
+        relay_count = relaycount if relay is not None else 0
         _nccl_bindings.allto_allv(
             s.ptr,
             s_counts.ctypes.data,
@@ -1327,6 +1334,7 @@ class Communicator:
             r_counts.ctypes.data,
             r_displs.ctypes.data,
             relay_ptr,
+            relay_count,
             int(s.dtype),
             int(self._comm),
             get_stream_ptr(stream),

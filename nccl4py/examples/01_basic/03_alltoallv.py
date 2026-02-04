@@ -114,7 +114,9 @@ def main():
     print(f"Rank {rank}: sendbuf:", sendbuf.cpu().tolist())
 
 
-    nccl_comm.alltoallv(sendbuf, recvbuf, sendcounts, sdispls, recvcounts, rdispls, relaybuf)
+    # relaycount: element count of relay buffer (e.g. 2 * nLocalRanks); use 16 for this example
+    relaycount = 16
+    nccl_comm.alltoallv(sendbuf, recvbuf, sendcounts, sdispls, recvcounts, rdispls, relaybuf, relaycount)
     torch.cuda.synchronize()
 
     recv_host = recvbuf.cpu()

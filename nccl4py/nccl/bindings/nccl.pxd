@@ -66,7 +66,7 @@ cpdef all_reduce(intptr_t sendbuff, intptr_t recvbuff, size_t count, int datatyp
 cpdef reduce_scatter(intptr_t sendbuff, intptr_t recvbuff, size_t recvcount, int datatype, int op, intptr_t comm, intptr_t stream)
 cpdef all_gather(intptr_t sendbuff, intptr_t recvbuff, size_t sendcount, int datatype, intptr_t comm, intptr_t stream)
 cpdef allto_all(intptr_t sendbuff, intptr_t recvbuff, size_t count, int datatype, intptr_t comm, intptr_t stream)
-cpdef allto_allv(intptr_t sendbuff, intptr_t sendcounts, intptr_t sdispls, intptr_t recvbuff, intptr_t recvcounts, intptr_t rdispls, intptr_t relaybuff, int datatype, intptr_t comm, intptr_t stream)
+cpdef allto_allv(intptr_t sendbuff, intptr_t sendcounts, intptr_t sdispls, intptr_t recvbuff, intptr_t recvcounts, intptr_t rdispls, intptr_t relaybuff, size_t relaycount, int datatype, intptr_t comm, intptr_t stream)
 cpdef gather(intptr_t sendbuff, intptr_t recvbuff, size_t count, int datatype, int root, intptr_t comm, intptr_t stream)
 cpdef scatter(intptr_t sendbuff, intptr_t recvbuff, size_t count, int datatype, int root, intptr_t comm, intptr_t stream)
 cpdef send(intptr_t sendbuff, size_t count, int datatype, int peer, intptr_t comm, intptr_t stream)
