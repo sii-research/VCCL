@@ -38,6 +38,7 @@ ncclResult_t ncclLaunchRma(struct ncclComm* comm, struct ncclKernelPlan* plan);
 ncclResult_t ncclRmaWaitSignal(struct ncclComm* comm, struct ncclKernelPlan* plan, cudaStream_t stream);
 ncclResult_t ncclRmaPut(struct ncclComm* comm, struct ncclKernelPlan* plan, cudaStream_t stream);
 
+// TODO: move the following contents to a new rma_coll.h file
 // below are for RMA collective operations
 // TODO: fill the contents!!
 struct ncclRmaCollArgs {
@@ -53,11 +54,14 @@ using ncclRmaWork = ncclKernelPlan;
 constexpr int NCCL_RMA_COLL_MAX_STREAMS = 4;
 static_assert(NCCL_RMA_COLL_MAX_STREAMS >= 4, "NCCL_RMA_COLL_MAX_STREAMS must be at least 4");
 struct ncclRmaCollState {
+  bool initialized;
   cudaStream_t rmaCollStream[NCCL_RMA_COLL_MAX_STREAMS];
   cudaEvent_t rmaCollEvent[NCCL_RMA_COLL_MAX_STREAMS];
 };
 
 // RMA collective function declarations
+ncclResult_t ncclRmaCollInit(struct ncclComm* comm);
+ncclResult_t ncclRmaCollFinalize(struct ncclComm* comm);
 ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* plan);
 ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan* plan);
 #endif
