@@ -10,6 +10,7 @@ mpirun -np 4 python 03_alltoallv.py
 """
 
 import sys
+import socket
 
 try:
     from mpi4py import MPI
@@ -49,6 +50,7 @@ def main():
     nranks = comm_mpi.Get_size()
 
     device_id = rank % torch.cuda.device_count()
+    print(f"Rank {rank}/{nranks} on host {socket.gethostname()} using GPU {device_id}")
     device = torch.device(f"cuda:{device_id}")
     torch.cuda.set_device(device)
 
@@ -88,7 +90,7 @@ def main():
     send_offset = 0
     recv_offset = chunk_size
     relay_offset = chunk_size * 2
-    sym_tensor = torch.from_dlpack(sym_buf)
+    sym_tensor = torch.from_dlpack(sym_buf).view(torch.float32)
     sendbuf = sym_tensor[send_offset : send_offset + send_total]
     relaybuf = sym_tensor[relay_offset : relay_offset + relay_total]
     recvbuf = sym_tensor[recv_offset : recv_offset + recv_total]
@@ -118,7 +120,7 @@ def main():
     recv_host = recvbuf.cpu()
     if rank == 0:
         print("=== After alltoallv (rank 0 recv data) ===")
-        print("recvbuf:", recv_host.tolist())
+        print(f"Rank {rank}: recvbuf:", recv_host.tolist())
         expected_full = torch.full((recv_total,), -1.0, dtype=torch.float32)
         for src in range(nranks):
             cnt = recvcounts[rank * nranks + src]
