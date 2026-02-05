@@ -42,7 +42,8 @@ struct ncclInfo {
   const size_t* sdispls;
   const size_t* recvcounts;
   const size_t* rdispls;
-  const void* relaybuff;
+  void* relaybuff;
+  size_t relaycount;
 };
 
 #endif

@@ -872,14 +872,14 @@ cdef ncclResult_t _ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t cou
         sendbuff, recvbuff, count, datatype, comm, stream)
 
 
-cdef ncclResult_t _ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts, const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls, const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+cdef ncclResult_t _ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts, const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls, void* relaybuff, size_t relaycount, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
     global __ncclAlltoAllv
     _check_or_init_nccl()
     if __ncclAlltoAllv == NULL:
         with gil:
             raise FunctionNotFoundError("function ncclAlltoAllv is not found")
-    return (<ncclResult_t (*)(const void*, const size_t*, const size_t*, void*, const size_t*, const size_t*, const void*, ncclDataType_t, ncclComm_t, cudaStream_t) noexcept nogil>__ncclAlltoAllv)(
-        sendbuff, sendcounts, sdispls, recvbuff, recvcounts, rdispls, relaybuff, datatype, comm, stream)
+    return (<ncclResult_t (*)(const void*, const size_t*, const size_t*, void*, const size_t*, const size_t*, void*, size_t, ncclDataType_t, ncclComm_t, cudaStream_t) noexcept nogil>__ncclAlltoAllv)(
+        sendbuff, sendcounts, sdispls, recvbuff, recvcounts, rdispls, relaybuff, relaycount, datatype, comm, stream)
 
 
 cdef ncclResult_t _ncclGather(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:

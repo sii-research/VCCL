@@ -1245,6 +1245,7 @@ class Communicator:
         - recvcounts (Sequence[int]): Elements expected from each rank (length == nranks*nranks).
         - rdispls (Sequence[int]): Element displacements in recvbuf (length == nranks*nranks).
             - relaybuf (NcclBufferSpec | None): Optional relay buffer. Defaults to None.
+                When provided, relay count is derived from the buffer size (relay.count).
             - stream (NcclStreamSpec, optional): CUDA stream for the operation. Defaults to None.
 
         """
@@ -1319,6 +1320,7 @@ class Communicator:
         r_displs = _np.ascontiguousarray(rdispls_arr, dtype=_np.uintp)
 
         relay_ptr = 0 if relay is None else relay.ptr
+        relay_count = relay.count if relay is not None else 0
         _nccl_bindings.allto_allv(
             s.ptr,
             s_counts.ctypes.data,
@@ -1327,6 +1329,7 @@ class Communicator:
             r_counts.ctypes.data,
             r_displs.ctypes.data,
             relay_ptr,
+            relay_count,
             int(s.dtype),
             int(self._comm),
             get_stream_ptr(stream),

@@ -188,11 +188,10 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
   // Iterate through each RMA work batch
   struct ncclRmaWorkBatch* batch = ncclIntruQueueHead(&plan->rmaWorkBatchQueue);
   while (batch != nullptr) {
-    /* For debugging: dump RMA work batch
+    //For debugging: dump RMA work batch
     if (comm->rank != 0) {
       dumpRmaWorkBatch(batch, comm->rank);
     }
-    */
     int opCnt = 0;  // Counter for number of operations launched in this batch
 
     // Launch the four types of RMA operations in parallel:

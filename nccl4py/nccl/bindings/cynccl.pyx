@@ -139,8 +139,8 @@ cdef ncclResult_t ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t coun
     return _nccl._ncclAlltoAll(sendbuff, recvbuff, count, datatype, comm, stream)
 
 
-cdef ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts, const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls, const void* relaybuff, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
-    return _nccl._ncclAlltoAllv(sendbuff, sendcounts, sdispls, recvbuff, recvcounts, rdispls, relaybuff, datatype, comm, stream)
+cdef ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts, const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls, void* relaybuff, size_t relaycount, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
+    return _nccl._ncclAlltoAllv(sendbuff, sendcounts, sdispls, recvbuff, recvcounts, rdispls, relaybuff, relaycount, datatype, comm, stream)
 
 
 cdef ncclResult_t ncclGather(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) except?_NCCLRESULT_T_INTERNAL_LOADING_ERROR nogil:
