@@ -2970,6 +2970,7 @@ ncclResult_t rmaCollTaskAppend(
   t->recvWinOffset = recvWinOffset;
   t->relayWin = comm->nNodes > 1 ? relayWin : nullptr;
   t->relayWinOffset = comm->nNodes > 1 ? relayWinOffset : 0;
+  t->relaycounts = info->relaycounts;
   t->sendcounts = info->sendcounts;
   t->sdispls = info->sdispls;
   t->recvcounts = info->recvcounts;

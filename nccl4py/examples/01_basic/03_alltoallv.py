@@ -6,10 +6,20 @@ NCCL4Py Basic Example: AlltoAllv
 This example demonstrates calling the NCCL4Py alltoallv API. 
 
 USAGE:
-mpirun -np 4 python 03_alltoallv.py
+mpirun -np 32 \
+  --allow-run-as-root \
+  -hostfile xxxx \
+  -x OMPI_MCA_coll=^ucc \
+  -x PYTHONPATH=../path/to/VCCL/nccl4py/build:$PYTHONPATH \
+  -x LD_LIBRARY_PATH=../path/to/VCCL/build/lib:$LD_LIBRARY_PATH \
+  -x NCCL_IB_HCA=="mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" \
+  -x NCCL_NET_PLUGIN= \
+  -x NCCL_NVLS_ENABLE=0 \
+  python examples/01_basic/03_alltoallv.py\
 """
 
 import sys
+import os
 import socket
 
 try:
@@ -75,8 +85,9 @@ def main():
 
     # brutely make it large enough FIXME
     chunk_size = 1024 * 1024
-    relay_total = chunk_size * 2
-    sym_total = chunk_size * 4
+    relay_chunks = int(os.environ.get("NCCL_RMA_RELAY_CHUNKS", "2"))
+    relay_total = chunk_size * relay_chunks
+    sym_total = chunk_size * (2 + relay_chunks)
     elem_size = torch.empty(0, dtype=torch.float32).element_size()
     sym_buf = nccl.mem_alloc(size=sym_total * elem_size, device=device_id)
     window = nccl_comm.register_window(sym_buf, flags=nccl.WindowFlag.CollSymmetric)
@@ -84,9 +95,9 @@ def main():
         raise RuntimeError("sym_buf register_window returned None")
 
     # |                           sym_buf                            |
-    # |--- sendbuf ---|--- recvbuf ---|--------relaybuf--------------|
-    # |offset: 0      |off:chunk_size |offset: chunk_size*2          |
-    # |len:send_total |len:recv_total |len:chunk_size*2              |
+    # |--- sendbuf ---|--- recvbuf ---|------------------ relaybuf ----------------------|
+    # |offset: 0      |off:chunk_size |offset: chunk_size * NCCL_RMA_RELAY_CHUNKS        |
+    # |len:send_total |len:recv_total |len:chunk_size * NCCL_RMA_RELAY_CHUNKS            |
     send_offset = 0
     recv_offset = chunk_size
     relay_offset = chunk_size * 2
@@ -145,6 +156,12 @@ def main():
         if not torch.equal(recv_host[disp : disp + cnt], expected):
             ok = False
             print(f"Rank {rank}: mismatch from src {src}")
+            if rank == 0:
+                actual_list = recv_host[disp : disp + cnt].tolist()
+                expected_list = expected.tolist()
+                print(f"  rdisp={disp} cnt={cnt} sdisp_src={sdisp_src}")
+                print(f"  expected: {expected_list}")
+                print(f"  actual  : {actual_list}")
 
     print(f"Rank {rank}: alltoallv {'OK' if ok else 'FAIL'} (send_total={send_total}, recv_total={recv_total})")
     nccl_comm.destroy()
@@ -153,4 +170,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
