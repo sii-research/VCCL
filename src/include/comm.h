@@ -309,6 +309,7 @@ struct ncclTaskRmaColl {
   // Window info for relay buffer (optional, for multi-node)
   struct ncclDevrWindow* relayWin;
   size_t relayWinOffset;
+  size_t relaycounts;
 
   // Counts and displacements
   const size_t* sendcounts;

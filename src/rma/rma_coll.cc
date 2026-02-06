@@ -8,10 +8,15 @@
 #include "alloc.h"
 #include "checks.h"
 #include "comm.h"
+#include "bootstrap.h"
+#include "param.h"
 #include "rma/rma.h"
 #include <functional>
 
 typedef ncclResult_t (*NcclRmaFunc_t)(struct ncclComm*, ncclRmaWork*, cudaStream_t);
+
+NCCL_PARAM(RmaCollBarrier, "RMA_COLL_BARRIER", 1);
+NCCL_PARAM(RmaRelayChunks, "RMA_RELAY_CHUNKS", 2);
 
 // Helper function to dump RMA task queue
 static void dumpRmaTaskQueue(const char* name,
@@ -63,6 +68,7 @@ static ncclResult_t dumpRmaWorkBatch(struct ncclRmaWorkBatch* batch, int rank) {
 
   return ncclSuccess;
 }
+
 
 ncclResult_t ncclRmaCollInit(struct ncclComm* comm) {
   ncclResult_t ret = ncclSuccess;
@@ -158,7 +164,9 @@ struct ncclRmaCollSchedule {
   size_t chunkSize;
 
   // Relay info
-  size_t relayHalfBytes; // Half of the relay buffer size
+  size_t relayHalfBytes; // Bytes per relay chunk
+  int relayChunks;
+  bool relayUseMonotonic;
 
   // Valid node deltas for interNode communication (skipping delta=0)
   int* validNodeDeltas;
@@ -168,6 +176,12 @@ struct ncclRmaCollSchedule {
   int nBatches;
   struct ncclRmaWorkBatch* batchesHead;
 };
+
+static size_t rmaRelayOffset(const struct ncclRmaCollSchedule* sched, int batchIdx) {
+  if (batchIdx < 0 || sched->relayHalfBytes == 0) return 0;
+  int idx = sched->relayUseMonotonic ? batchIdx : (batchIdx % sched->relayChunks);
+  return (size_t)idx * sched->relayHalfBytes;
+}
 
 ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   ncclResult_t ret = ncclSuccess;
@@ -185,13 +199,22 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
     NCCLCHECK(ncclRmaCollInit(comm));
   }
 
+  const char* relayEnv = ncclGetEnv("NCCL_RMA_RELAY_CHUNKS");
+  bool relayChunksCustom = relayEnv && relayEnv[0] != '\0';
+
+  const char* barrierEnv = ncclGetEnv("NCCL_RMA_COLL_BARRIER");
+  bool useBarrier = barrierEnv ? (ncclParamRmaCollBarrier() != 0) : !relayChunksCustom;
+  if (useBarrier && comm->rank == 0) INFO(NCCL_COLL, "RMA Coll batch barrier enabled");
+  else INFO(NCCL_COLL, "RMA Coll batch barrier disabled");
+
+  int batchIdx = 0;
   // Iterate through each RMA work batch
   struct ncclRmaWorkBatch* batch = ncclIntruQueueHead(&plan->rmaWorkBatchQueue);
   while (batch != nullptr) {
     //For debugging: dump RMA work batch
-    if (comm->rank != 0) {
-      dumpRmaWorkBatch(batch, comm->rank);
-    }
+    // if (comm->rank != 0) {
+    //   dumpRmaWorkBatch(batch, comm->rank);
+    // }
     int opCnt = 0;  // Counter for number of operations launched in this batch
 
     // Launch the four types of RMA operations in parallel:
@@ -243,7 +266,10 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
       CUDACHECKGOTO(cudaEventRecord(workEvent, workStream), ret, fail);
       CUDACHECKGOTO(cudaStreamWaitEvent(mainStream, workEvent, 0), ret, fail);
     }
-
+    if (useBarrier) {
+      NCCLCHECKGOTO(bootstrapBarrier(comm->bootstrap, comm->rank, comm->nRanks, 0xBEEF + batchIdx), ret, fail);
+    }
+    batchIdx++;
     // Move to next batch
     batch = batch->next;
   }
@@ -281,16 +307,13 @@ static ncclResult_t rmaCollTasksPrepare(
   sched->nRanks = comm->nRanks;
   sched->localRank = comm->localRank;
   sched->localRanks = comm->localRanks;
-  sched->node = comm->rank / comm->localRanks;
-  sched->nNodes = comm->nRanks / comm->localRanks;
+  sched->node = comm->node;
+  sched->nNodes = comm->nNodes;
   sched->nNodesPow2 = pow2Up(sched->nNodes);
 
   // Initialize data transfer info
   sched->eltSize = ncclTypeSize(task->datatype);
   sched->chunkSize = 1ULL << 30; // 1GB
-
-  // Initialize relay info
-  sched->relayHalfBytes = 1024 * 1024 * sched->eltSize; // TODO: read from api
 
   // Compute valid node deltas (for interNode rounds, starting from delta=0)
   NCCLCHECK(ncclCalloc(&sched->validNodeDeltas, sched->nNodesPow2));
@@ -301,6 +324,35 @@ static ncclResult_t rmaCollTasksPrepare(
       sched->validNodeDeltas[sched->nValidNodeRounds++] = nodeDelta;
     }
     nodeDelta = (nodeDelta + nr + 1) & (sched->nNodesPow2 - 1);
+  }
+
+  // Initialize relay info (per-chunk size derived from relaycounts)
+  sched->relayChunks = (int)ncclParamRmaRelayChunks();
+  if (sched->relayChunks < 2) {
+    WARN("RMA coll: NCCL_RMA_RELAY_CHUNKS=%d is out of range [2,n]", sched->relayChunks);
+    return ncclInvalidArgument;
+  }
+  const char* relayEnv = ncclGetEnv("NCCL_RMA_RELAY_CHUNKS");
+  sched->relayUseMonotonic = relayEnv && relayEnv[0] != '\0';
+  if (sched->nNodes > 1) {
+    size_t relayBytes = task->relaycounts * sched->eltSize;
+    if (relayBytes == 0) {
+      WARN("RMA coll: relaycounts is 0 for multi-node run");
+      return ncclInvalidArgument;
+    }
+    if (relayBytes % (size_t)sched->relayChunks != 0) {
+      WARN("RMA coll: relay buffer bytes %zu not divisible by relay chunks %d", relayBytes, sched->relayChunks);
+      return ncclInvalidArgument;
+    }
+    sched->relayHalfBytes = relayBytes / (size_t)sched->relayChunks;
+    int neededRelayChunks = sched->nValidNodeRounds - 1;
+    if (sched->relayUseMonotonic && sched->relayChunks < neededRelayChunks) {
+      WARN("RMA coll: relay chunks %d < required %d for monotonic relay indexing",
+           sched->relayChunks, neededRelayChunks);
+      return ncclInvalidArgument;
+    }
+  } else {
+    sched->relayHalfBytes = 0;
   }
 
   // Allocate batches (one per valid nodeRound)
@@ -431,7 +483,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         // (ceRecvRankSameRail ---> sched.rank ---relay--> other_local_ranks)
         // Data received at sameRail rank needs to be distributed locally
         int ceRecvRankSameRail = comm->nodeRanks[ceRecvNode].localRankToRank[sched.localRank];
-        size_t relayToggleOffset = ((batchIdx - 1) & 1) ? sched.relayHalfBytes : 0;
+        size_t relayToggleOffset = rmaRelayOffset(&sched, batchIdx - 1);
         size_t innerOffset = 0; // accumulated offset in relay buffer between multiple ranks on the same node
         for (int lr = 0; lr < sched.localRanks; lr++) {
           int destRank = comm->localRankToRank[lr];
@@ -479,7 +531,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           if (lr == sched.localRank) continue;
           int localPeerRank = comm->localRankToRank[lr];
           int srcRank = comm->nodeRanks[ceRecvNode].localRankToRank[lr];
-          size_t recvCount = task->recvcounts[srcRank * sched.nRanks + sched.rank];
+          size_t recvCount = task->recvcounts[sched.rank * sched.nRanks + srcRank];
           if (recvCount > 0) {
             peerRanks[nPeersWithSignals] = localPeerRank;
             peerSignalCounts[nPeersWithSignals] = 1;
@@ -554,7 +606,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         {
           int sendNode = (sched.node + proxyNodeDelta) % sched.nNodes;
           int sendRankSameRail = comm->nodeRanks[sendNode].localRankToRank[sched.localRank];
-          size_t relayToggleOffset = (batchIdx & 1) ? sched.relayHalfBytes : 0;
+          size_t relayToggleOffset = rmaRelayOffset(&sched, batchIdx);
           size_t innerOffset = 0; // accumulated offset in relay buffer between multiple ranks on the same node
           for (int lr = 0; lr < comm->nodeRanks[sendNode].localRanks; lr++) {
             int targetRank = comm->nodeRanks[sendNode].localRankToRank[lr];
