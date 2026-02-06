@@ -16,6 +16,8 @@ mpirun -np 32 \
   -x NCCL_NET_PLUGIN= \
   -x NCCL_NVLS_ENABLE=0 \
   python examples/01_basic/03_alltoallv.py\
+  # -x NCCL_RMA_RELAY_CHUNKS=3 \
+  # -x NCCL_RMA_COLL_BARRIER=1 \
 """
 
 import sys
