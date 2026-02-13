@@ -43,10 +43,11 @@
 #define NVTX_SID_Signal               22
 #define NVTX_SID_WaitSignal           23
 #define NVTX_SID_AlltoAllv            24
+#define NVTX_SID_IntRMA               25
 // When adding new schema IDs, DO NOT re-use/overlap with the enum schema ID below!
 
 // Define static schema ID for the reduction operation.
-#define NVTX_PAYLOAD_ENTRY_NCCL_REDOP 24 + NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START
+#define NVTX_PAYLOAD_ENTRY_NCCL_REDOP 26 + NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START
 
 extern const nvtxDomainHandle_t ncclNvtxDomainHandle;
 
@@ -134,6 +135,24 @@ class ncclOptionalNvtxScopedRange
     nvtx3_range__.push(nvtx3_func_attr__);                                                       \
   }
 
+// Create NVTX start/end range with parameters using an external range object.
+// @param R ncclOptionalNvtxPayloadRangeWithId object
+// @param N NCCL API name without the `nccl` prefix.
+// @param T name of the used NVTX payload schema without "Schema" suffix.
+// @param P payload parameters/entries
+#define NVTX3_RANGE_WITH_PARAMS(R, N, T, P)                                                      \
+  if (!ncclParamNvtxDisable())                                                                   \
+  {                                                                                              \
+    constexpr uint64_t schemaId = NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START + NVTX_SID_##N; \
+    static const payload_schema                                                                  \
+        schema{T##Schema, std::extent<decltype(T##Schema)>::value - 1, schemaId, sizeof(T)};     \
+    static ::nvtx3::v1::registered_string_in<nccl_domain> const nvtx3_func_name__{__func__};     \
+    const T _payload = {P};                                                                      \
+    nvtxPayloadData_t nvtx3_bpl__[] = {{schemaId, sizeof(_payload), &_payload}};                 \
+    ::nvtx3::v1::event_attributes const nvtx3_func_attr__{nvtx3_func_name__, nvtx3_bpl__};       \
+    R.push(nvtx3_func_attr__);                                                                   \
+  }
+
 #define NCCL_NVTX3_FUNC_RANGE \
   ncclOptionalNvtxScopedRange nvtx3_range__; \
   if (!ncclParamNvtxDisable()) { \
@@ -184,6 +203,52 @@ class ncclOptionalNvtxPayloadRange {
 
  private:
   bool pushed = false;
+  nvtxPayloadData_t payloadData = {NVTX_PAYLOAD_ENTRY_TYPE_INVALID, 0, NULL};
+};
+
+/// @brief Creates an NVTX range with extended payload and explicit range ID.
+/// @tparam PayloadType Data type of the payload.
+template <typename PayloadType>
+class ncclOptionalNvtxPayloadRangeWithId {
+ public:
+  void push(const nvtx3::event_attributes& attr) noexcept {
+    // pushed must not be true already, but it's too expensive to check
+    pushed = true;
+    rangeId = nvtxDomainRangeStartEx(nvtx3::domain::get<nccl_domain>(), attr.get());
+  }
+
+  ~ncclOptionalNvtxPayloadRangeWithId() noexcept {
+    if (!pushed) {
+      return;
+    }
+    if (payloadData.payload) {
+      nvtxRangeEndPayload(nvtx3::domain::get<nccl_domain>(), rangeId, &payloadData, 1);
+    } else {
+      nvtxDomainRangeEnd(nvtx3::domain::get<nccl_domain>(), rangeId);
+    }
+  }
+
+  void setPayloadData(const uint64_t schemaId) noexcept
+  {
+    payloadData = {schemaId, sizeof(PayloadType), &payload};
+  }
+
+  ncclOptionalNvtxPayloadRangeWithId() = default;
+  ncclOptionalNvtxPayloadRangeWithId(ncclOptionalNvtxPayloadRangeWithId const&) = delete;
+  ncclOptionalNvtxPayloadRangeWithId& operator=(ncclOptionalNvtxPayloadRangeWithId const&) = delete;
+  ncclOptionalNvtxPayloadRangeWithId(ncclOptionalNvtxPayloadRangeWithId&&) = delete;
+  ncclOptionalNvtxPayloadRangeWithId& operator=(ncclOptionalNvtxPayloadRangeWithId&&) = delete;
+
+  // Holds the payload data.
+  PayloadType payload{};
+
+  bool isPushed() const noexcept {
+    return pushed;
+  }
+
+ private:
+  bool pushed = false;
+  nvtxRangeId_t rangeId = 0;
   nvtxPayloadData_t payloadData = {NVTX_PAYLOAD_ENTRY_TYPE_INVALID, 0, NULL};
 };
 
