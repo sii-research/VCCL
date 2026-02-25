@@ -201,6 +201,10 @@ static ncclResult_t ncclGdrCudaCalloc(T** ptr, T** devPtr, size_t nelem, void** 
   ALIGN_SIZE(mapSize, GPU_PAGE_SIZE);
   // GDRCOPY Pinned buffer has to be GPU_PAGE_SIZE aligned too
   NCCLCHECK(ncclCudaCalloc(&devMem, mapSize+GPU_PAGE_SIZE-1));
+#ifdef AMEM_PLUGIN
+  printf("AMEM pid:%d %s %d regMr dptr:%p sz:%zu now defensive remove\n", getpid(), __FUNCTION__, __LINE__, devMem, mapSize+GPU_PAGE_SIZE-1); 
+  amem_delAllocInfo((CUdeviceptr)devMem, 0, 0);
+#endif
   uint64_t alignedAddr = (((uint64_t) devMem) + GPU_PAGE_OFFSET) & GPU_PAGE_MASK;
   size_t align = alignedAddr - (uint64_t)devMem;
 

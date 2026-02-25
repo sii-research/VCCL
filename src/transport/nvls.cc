@@ -259,6 +259,10 @@ static ncclResult_t nvlsAllocateMem(struct ncclComm* comm, const CUmemAccessDesc
   CUCHECKGOTO(cuMemSetAccess((CUdeviceptr)*mcptr, mcsize, desc, 1), ret, fail);
   *ucsizePtr = ucsize;
   *mcsizePtr = mcsize;
+#ifdef AMEM_PLUGIN
+  // record ucHandle, ucptr, ucsize, mcHandle, offset (0 for now)
+  amem_addAllocInfo((CUdeviceptr)*ucptr, ucsize, AMEM_TYPE_CUMEM_LOCAL_SYMM, comm->cudaDev, (uint64_t)*ucHandle, -1, (uint64_t)*mcHandle, comm, AMEM_CALLER_NCCL_NVLS);
+#endif
   INFO(NCCL_NVLS, "NVLS rank %d (dev %d) alloc done, ucptr %p ucgran %ld mcptr %p mcgran %ld ucsize %ld mcsize %ld (inputsize %ld)", comm->rank, comm->cudaDev, *ucptr, ucgran, *mcptr, mcgran, ucsize, mcsize, size);
 
 exit:

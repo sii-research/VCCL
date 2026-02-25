@@ -296,6 +296,10 @@ ncclResult_t ncclGpuGdrSupport(struct ncclComm* comm, int* gdrSupport) {
     }
 
     NCCLCHECKGOTO(ncclCudaMalloc(&gpuPtr, GPU_BUF_SIZE), ret, cleanup2);
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d regMr dptr:%p size:%d now defensive remove\n", getpid(), __FUNCTION__, __LINE__, gpuPtr, GPU_BUF_SIZE);
+    amem_delAllocInfo((CUdeviceptr)gpuPtr, 0, 0);
+#endif
     if (comm->ncclNet->regMr(sComm, gpuPtr, GPU_BUF_SIZE, NCCL_PTR_CUDA, &mHandle) == ncclSuccess) {
       NCCLCHECK(comm->ncclNet->deregMr(sComm, mHandle));
       NCCLCHECK(comm->ncclNet->regMr(rComm, gpuPtr, GPU_BUF_SIZE, NCCL_PTR_CUDA, &mHandle));

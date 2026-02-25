@@ -222,6 +222,10 @@ ncclResult_t ncclP2pAllocateShareableBuffer(size_t size, int refcount, ncclIpcDe
     }
     if (refcount) {
       memcpy(&ipcDesc->memHandle, &handle, sizeof(handle));
+#ifdef AMEM_PLUGIN
+      amem_addRefcount(*ptr, refcount);
+      printf("AMEM pid:%d func:%s %d handle %llx add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, handle, refcount);
+#endif
       for (int r = 0; r < refcount; ++r) CUCHECK(cuMemRetainAllocationHandle(&handle, *ptr));
     }
 #else
@@ -246,7 +250,7 @@ ncclResult_t ncclP2pFreeShareableBuffer(ncclIpcDesc *ipcDesc) {
   return ncclSuccess;
 }
 
-ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr) {
+ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_t size, ncclIpcDesc *ipcDesc, void **devMemPtr, int peerDev) {
   if (ncclCuMemEnable()) {
 #if CUDART_VERSION >= 11030
     // cuMem API support
@@ -278,6 +282,17 @@ ncclResult_t ncclP2pImportShareableBuffer(struct ncclComm *comm, int peer, size_
     }
     CUCHECK(cuMemAddressReserve(&dptr, size, /* alignment */ 0, /* addr */ 0, /* flags */ 0));
     CUCHECK(cuMemMap(dptr, size, /* offset */ 0, handle, /* flags */ 0));
+#ifdef AMEM_PLUGIN
+    if (type == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR)
+    {
+      // cuDesc(union of data/handle, 8B) is the src handle
+      amem_addAllocInfo(dptr, size, AMEM_TYPE_CUMEM_PEER_POSIX, comm->cudaDev, handle, peerDev, (uint64_t)cuDesc->data, comm, AMEM_CALLER_NCCL_P2P_PEER);
+    }
+    else
+    {
+      amem_addAllocInfo(dptr, size, AMEM_TYPE_CUMEM_PEER_FABRIC, comm->cudaDev, handle, peerDev, (uint64_t)cuDesc, comm, AMEM_CALLER_NCCL_P2P_PEER);
+    }
+#endif
 
     TRACE(NCCL_P2P, "Imported shareable buffer size %zu handle 0x%llx dptr %p", size, handle, (void*)dptr);
 
@@ -349,7 +364,7 @@ static ncclResult_t p2pMap(struct ncclComm *comm, struct ncclProxyConnector* pro
     }
   } else {
     // Different PID
-    NCCLCHECK(ncclP2pImportShareableBuffer(comm, peerInfo->rank, p2pBuff->size, &p2pBuff->ipcDesc, devMem));
+    NCCLCHECK(ncclP2pImportShareableBuffer(comm, peerInfo->rank, p2pBuff->size, &p2pBuff->ipcDesc, devMem, peerInfo->cudaDev));
     *ipcPtr = *devMem;
   }
   return ncclSuccess;
@@ -410,6 +425,14 @@ ncclResult_t p2pSendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph, st
   memset(&req, '\0', sizeof(req));
   req.size = sendSize;
   req.refcount = 0;
+  if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) {
+    req.refcount++;
+    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
+  }
+  if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) {
+    req.refcount++;
+    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
+  }
   if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) req.refcount++;
   if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) req.refcount++;
   NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_P2P, 1, info->rank, &send->proxyConn));
@@ -470,6 +493,14 @@ ncclResult_t p2pRecvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph, st
   memset(&req, '\0', sizeof(req));
   req.size = recvSize;
   req.refcount = 0;
+  if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) {
+    req.refcount++;
+    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
+  }
+  if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) {
+    req.refcount++;
+    printf("AMEM pid:%d func:%s %d add refcount:%d\n", getpid(), __FUNCTION__, __LINE__, req.refcount);
+  }
   if (P2P_SAME_PID((comm->peerInfo + info->rank), peerInfo) && (comm->peerInfo[info->rank].cudaDev != peerInfo->cudaDev)) req.refcount++;
   if (P2P_SAME_PID((comm->peerInfo + info->rank), myInfo) && (comm->peerInfo[info->rank].cudaDev != myInfo->cudaDev)) req.refcount++;
   NCCLCHECK(ncclProxyConnect(comm, TRANSPORT_P2P, 0, info->rank, &recv->proxyConn));
@@ -909,6 +940,9 @@ ncclResult_t ret = ncclSuccess;
           regRecord->regIpcAddrs.hostPeerRmtAddrs[peerLocalRank] = (uintptr_t)rmtRegAddr;
           needUpdate = true;
           *regBufFlag = 1;
+#ifdef AMEM_PLUGIN
+          amem_addPeerInfo(regRecord->begAddr, (CUdeviceptr)rmtRegAddr, peerRank);
+#endif
           INFO(NCCL_REG, "rank %d - IPC registered buffer %p size %ld (baseAddr %p size %ld) to peer %d regAddr %p offsetOut %ld", comm->rank, userbuff, buffSize, (void*)regRecord->addr, ipcInfo.size, peerRank, rmtRegAddr, (uintptr_t)userbuff - regRecord->addr);
         }
       }
@@ -1078,6 +1112,11 @@ static ncclResult_t p2pProxyRegister(struct ncclProxyConnection* connection, str
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     CUCHECKGOTO(cuMemSetAccess((CUdeviceptr)regAddr, ipcExpInfo->size, &accessDesc, 1), ret, fail);
     regAddr = (void*)((uintptr_t)regAddr + ipcExpInfo->offset);
+#ifdef AMEM_PLUGIN
+    if (ncclCuMemHandleType == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) { // No peer info available!!
+      amem_addAllocInfo((CUdeviceptr)regAddr, ipcExpInfo->size, AMEM_TYPE_CUMEM_PEER_POSIX, proxyState->cudaDev, handle, -1, ipcExpInfo->impFd, connection, AMEM_CALLER_NCCL_PROXY);
+    }
+#endif
   }
   INFO(NCCL_REG, "Proxy rank %d register success regAddr %p size %ld offset %ld legacyIpcCap %d sameProcess %d", proxyState->tpRank, regAddr, ipcExpInfo->size, ipcExpInfo->offset, ipcExpInfo->legacyIpcCap, connection->sameProcess);
 
@@ -1087,6 +1126,9 @@ exit:
   return ret;
 fail:
   if (!ipcExpInfo->legacyIpcCap) {
+#ifdef AMEM_PLUGIN
+    amem_delAllocInfo((CUdeviceptr)regAddr, 0, 0);
+#endif
     if (mapped) CUCHECK(cuMemUnmap((CUdeviceptr)regAddr, ipcExpInfo->size));
     if (regAddr) CUCHECK(cuMemAddressFree((CUdeviceptr)regAddr, ipcExpInfo->size));
     if (imported) CUCHECK(cuMemRelease(handle));

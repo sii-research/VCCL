@@ -22,6 +22,10 @@
 #include "cudawrap.h"
 #endif
 
+#ifdef AMEM_PLUGIN
+#include "amem_nccl.h"
+#endif
+
 uint64_t clockNano(); // from utils.h with which we have a circular dependency
 
 template<typename T>
@@ -190,6 +194,9 @@ static inline ncclResult_t ncclCuMemAllocAddr(void **ptr, CUmemGenericAllocation
   accessDesc.location.id = cudaDev;
   accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
   CUCHECK(cuMemSetAccess((CUdeviceptr)*ptr, size, &accessDesc, 1));
+  #ifdef AMEM_PLUGIN
+  amem_addAllocInfo((CUdeviceptr)ptr, size, AMEM_TYPE_CUMEM_LOCAL, cudaDev, *handleIn, -1, 0, NULL, AMEM_CALLER_NCCL_DEFAULT);
+  #endif
   TRACE(NCCL_ALLOC, "CuMem Map Size %zu pointer %p handle %llx", size, *ptr, *handleIn);
   return result;
 }
@@ -199,6 +206,9 @@ static inline ncclResult_t ncclCuMemFreeAddr(void *ptr) {
   ncclResult_t result = ncclSuccess;
   size_t size = 0;
   CUCHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
+  #ifdef AMEM_PLUGIN
+  amem_delAllocInfo((CUdeviceptr) ptr, 0, 0);
+  #endif
   CUCHECK(cuMemUnmap((CUdeviceptr)ptr, size));
   CUCHECK(cuMemAddressFree((CUdeviceptr)ptr, size));
   return result;
@@ -231,6 +241,9 @@ static inline ncclResult_t ncclCuMemAlloc(void **ptr, CUmemGenericAllocationHand
   /* Map the virtual address range to the physical allocation */
   CUCHECK(cuMemMap((CUdeviceptr)*ptr, size, 0, handle, 0));
   /* Now allow RW access to the newly mapped memory */
+  #ifdef AMEM_PLUGIN
+  amem_addAllocInfo((CUdeviceptr)*ptr, size, AMEM_TYPE_CUMEM_LOCAL, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_P2P);
+  #endif
   accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   accessDesc.location.id = currentDev;
   accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
@@ -247,6 +260,9 @@ static inline ncclResult_t ncclCuMemFree(void *ptr) {
   size_t size = 0;
   CUCHECK(cuMemRetainAllocationHandle(&handle, ptr));
   CUCHECK(cuMemRelease(handle));
+  #ifdef AMEM_PLUGIN
+  amem_delAllocInfo((CUdeviceptr) ptr, handle, 0);
+  #endif
   CUCHECK(cuMemGetAddressRange(NULL, &size, (CUdeviceptr)ptr));
   TRACE(NCCL_ALLOC, "CuMem Free Size %zu pointer %p handle 0x%llx", size, ptr, handle);
   CUCHECK(cuMemUnmap((CUdeviceptr)ptr, size));

@@ -405,6 +405,10 @@ static ncclResult_t sharedBuffersInit(struct ncclCollNetSharedRes* collNet, int 
 
   if (cuda && collNet->cudaBuff == NULL) {
     NCCLCHECK(ncclCudaCalloc(&collNet->cudaBuff, *size));
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d calloc dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, collNet->cudaBuff, *size);
+    amem_delAllocInfo((CUdeviceptr)collNet->cudaBuff, 0, 0);
+#endif
     cudaMemset(collNet->cudaBuff, 0x33, *size/2);
     cudaMemset((char*)collNet->cudaBuff + *size/2, 0x66, *size/2);
   }
@@ -523,6 +527,10 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
   /* DMA-BUF support */
   if (resources->useGdr && resources->useDmaBuf) {
     CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d dptr:%llx size:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, dmabuf_fd);
+    amem_delAllocInfo((CUdeviceptr)mapMem->cpuPtr, 0, 0);
+#endif
     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, mapMem->cpuPtr, mapMem->size,
                                                        NCCL_PTR_CUDA, 0ULL, dmabuf_fd,
                                                        &resources->sendMhandles[NCCL_PROTO_SIMPLE]),
@@ -601,6 +609,10 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
   /* DMA-BUF support */
   if (resources->useGdr && resources->useDmaBuf) {
     CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d dptr:%llx size:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)mapMem->cpuPtr, mapMem->size, dmabuf_fd);
+    amem_delAllocInfo((CUdeviceptr)mapMem->cpuPtr, 0, 0);
+#endif
     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, mapMem->cpuPtr, mapMem->size,
                                                        NCCL_PTR_CUDA, 0ULL, dmabuf_fd,
                                                        &resources->mhandles[NCCL_PROTO_SIMPLE]),
@@ -1305,6 +1317,10 @@ static ncclResult_t sendProxyRegBuffer(struct ncclProxyConnection* connection, s
   /* DMA-BUF support */
   if (resources->useGdr && resources->useDmaBuf) {
     CUCHECKGOTO(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d dptr:%llx sz:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size, dmabuf_fd);
+    amem_delAllocInfo((CUdeviceptr)info->buffer, 0, 0);
+#endif
     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
     needReg = false;
   }
@@ -1341,6 +1357,10 @@ static ncclResult_t recvProxyRegBuffer(struct ncclProxyConnection* connection, s
   /* DMA-BUF support */
   if (resources->useGdr && resources->useDmaBuf) {
     CUCHECKGOTO(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d dptr:%llx sz:%ld fd:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size, dmabuf_fd);
+    amem_delAllocInfo((CUdeviceptr)info->buffer, 0, 0);
+#endif
     NCCLCHECKGOTO(proxyState->ncclCollNet->regMrDmaBuf(resources->collNetComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
     needReg = false;
   }

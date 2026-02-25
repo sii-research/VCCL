@@ -588,8 +588,16 @@ static ncclResult_t sharedNetBuffersInit(struct ncclProxyState* proxyState, int 
   if (cuda && state->cudaBuff == NULL) {
     if (sameProcess == 0 || ncclCuMemEnable()) {
       NCCLCHECK(ncclP2pAllocateShareableBuffer(state->size, 0, &state->ipcDesc, (void**)&state->cudaBuff));
+#ifdef AMEM_PLUGIN
+      printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, state->cudaBuff, state->size);
+      amem_delAllocInfo((CUdeviceptr)state->cudaBuff, 0, 0);
+#endif
     } else {
       NCCLCHECK(ncclCudaCalloc(&state->cudaBuff, state->size));
+#ifdef AMEM_PLUGIN
+      printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, state->cudaBuff, state->size);
+      amem_delAllocInfo((CUdeviceptr)state->cudaBuff, 0, 0);
+#endif
     }
   }
   if (!cuda && state->hostBuff == NULL) {
@@ -856,8 +864,18 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
         ALIGN_SIZE(map->mems[NCCL_NET_MAP_DEVMEM].size, CUDA_IPC_MIN);
         NCCLCHECK(ncclP2pAllocateShareableBuffer(map->mems[NCCL_NET_MAP_DEVMEM].size, 0, &map->mems[NCCL_NET_MAP_DEVMEM].ipcDesc,
                                                  (void**)&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr));
+#ifdef AMEM_PLUGIN
+        printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__,
+               map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size);
+        amem_delAllocInfo((CUdeviceptr)map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, 0, 0);
+#endif
       } else {
         NCCLCHECK(ncclCudaCalloc(&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size));
+#ifdef AMEM_PLUGIN
+        printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__,
+               map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size);
+        amem_delAllocInfo((CUdeviceptr)map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, 0, 0);
+#endif
       }
       map->mems[NCCL_NET_MAP_DEVMEM].cpuPtr = map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr;
     }
@@ -900,6 +918,9 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
       if (type == NCCL_PTR_CUDA && resources->useDmaBuf) {
         int dmabuf_fd;
         CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p], CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
+#ifdef AMEM_PLUGIN
+        printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p]);
+#endif
         NCCLCHECK(proxyState->ncclNet->regMrDmaBuf(resources->netSendComm, resources->buffers[p], resources->buffSizes[p], type, 0ULL, dmabuf_fd, &resources->mhandles[p]));
         (void)close(dmabuf_fd);
       } else // FALL-THROUGH to nv_peermem GDR path
@@ -1010,6 +1031,11 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
       if (ncclCuMemEnable()) {
         NCCLCHECK(ncclP2pAllocateShareableBuffer(map->mems[NCCL_NET_MAP_DEVMEM].size, 0, &map->mems[NCCL_NET_MAP_DEVMEM].ipcDesc,
                                                  (void**)&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr));
+#ifdef AMEM_PLUGIN
+        printf("AMEM pid:%d %s %d dptr:%p sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__,
+               map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size);
+        amem_delAllocInfo((CUdeviceptr)map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, 0, 0);
+#endif
       } else {
         NCCLCHECK(ncclCudaCalloc(&map->mems[NCCL_NET_MAP_DEVMEM].gpuPtr, map->mems[NCCL_NET_MAP_DEVMEM].size));
       }
@@ -1044,6 +1070,9 @@ static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, str
       if (type == NCCL_PTR_CUDA && resources->useDmaBuf) {
         int dmabuf_fd;
         CUCHECK(cuMemGetHandleForAddressRange((void *)&dmabuf_fd, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p], CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)));
+#ifdef AMEM_PLUGIN
+        printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%d defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)resources->buffers[p], resources->buffSizes[p]);
+#endif
         NCCLCHECK(proxyState->ncclNet->regMrDmaBuf(resources->netRecvComm, resources->buffers[p], resources->buffSizes[p], type, 0ULL, dmabuf_fd, &resources->mhandles[p]));
         (void)close(dmabuf_fd);
       } else // FALL-THROUGH to nv_peermem GDR path
@@ -1968,6 +1997,9 @@ static ncclResult_t sendProxyRegBuffer(struct ncclProxyConnection* connection, s
   if (resources->useDmaBuf) {
     int dmabuf_fd;
     CUCHECKGOTO(cuMemGetHandleForAddressRange((void*)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%ld defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size);
+#endif
     NCCLCHECKGOTO(proxyState->ncclNet->regMrDmaBuf(resources->netSendComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
     (void)close(dmabuf_fd);
     needReg = false;
@@ -2002,6 +2034,9 @@ static ncclResult_t recvProxyRegBuffer(struct ncclProxyConnection* connection, s
   if (resources->useDmaBuf) {
     int dmabuf_fd;
     CUCHECKGOTO(cuMemGetHandleForAddressRange((void*)&dmabuf_fd, (CUdeviceptr)info->buffer, info->size, CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, getHandleForAddressRangeFlags(resources->useGdr)), ret, peermem);
+#ifdef AMEM_PLUGIN
+    printf("AMEM pid:%d %s %d regMrDma dptr:%llx sz:%ld defensive remove\n", getpid(), __FUNCTION__, __LINE__, (CUdeviceptr)info->buffer, info->size);
+#endif
     NCCLCHECKGOTO(proxyState->ncclNet->regMrDmaBuf(resources->netRecvComm, (void*)info->buffer, info->size, NCCL_PTR_CUDA, 0ULL, dmabuf_fd, &handle), ret, peermem);
     (void)close(dmabuf_fd);
     needReg = false;

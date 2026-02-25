@@ -52,7 +52,7 @@ PKGTARGET  := $(PKGCONFIGFILE)
 LIBOBJ     := $(LIBSRCFILES:%.cc=$(OBJDIR)/%.o)
 BINOBJ     := $(BINSRCFILES:%.cc=$(OBJDIR)/%.o)
 DEPFILES   := $(LIBOBJ:%.o=%.d) $(BINOBJ:%.o=%.d)
-LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl
+LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl -fPIC -L../../../lib -lamem_nccl
 ifneq ($(wildcard /usr/lib/x86_64-linux-gnu/libmlx5.so),)
   LDFLAGS += -lmlx5
 else ifneq ($(wildcard /usr/lib/x86_64-linux-gnu/libmlx5.so.1),)
@@ -95,7 +95,7 @@ $(INCDIR)/nccl.h : nccl.h.in ../makefiles/version.mk
 $(LIBDIR)/$(LIBTARGET): $(LIBOBJ) $(DEVMANIFEST)
 	@printf "Linking    %-35s > %s\n" $(LIBTARGET) $@
 	mkdir -p $(LIBDIR)
-	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -o $@ $(LIBOBJ) $$(cat $(DEVMANIFEST)) $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -shared -Wl,--no-as-needed -Wl,-soname,$(LIBSONAME) -lamem_nccl -o $@ $(LIBOBJ) $$(cat $(DEVMANIFEST)) $(LDFLAGS)
 	ln -sf $(LIBSONAME) $(LIBDIR)/$(LIBNAME)
 	ln -sf $(LIBTARGET) $(LIBDIR)/$(LIBSONAME)
 
@@ -136,7 +136,7 @@ $(PKGDIR)/%.pc : %.pc
 $(OBJDIR)/%.o : %.cc $(INCTARGETS)
 	@printf "Compiling  %-35s > %s\n" $< $@
 	mkdir -p `dirname $@`
-	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -c $< -o $@
+	$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -std=c++17 -DAMEM_PLUGIN -I../../../amem_nccl_plugin -Iinclude -I$(INCPLUGIN) -c $< -o $@
 	@$(CXX) -I. -I$(INCDIR) $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -M $< > $(@:%.o=%.d.tmp)
 	@sed "0,/^.*:/s//$(subst /,\/,$@):/" $(@:%.o=%.d.tmp) > $(@:%.o=%.d)
 	@sed -e 's/.*://' -e 's/\\$$//' < $(@:%.o=%.d.tmp) | fmt -1 | \

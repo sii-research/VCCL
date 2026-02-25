@@ -2338,6 +2338,16 @@ ncclResult_t  ncclMemAlloc(void **ptr, size_t size) {
     CUCHECK(cuMemAddressReserve((CUdeviceptr*)ptr, handleSize, memGran, 0, 0));
     /* Map the virtual address range to the physical allocation */
     CUCHECK(cuMemMap((CUdeviceptr)*ptr, handleSize, 0, handle, 0));
+
+    /* Add AMEM PLUGIN */
+    #ifdef AMEM_PLUGIN
+    if (requestedHandleTypes == CU_MEM_HANDLE_TYPE_FABRIC) {
+      amem_addAllocInfo((CUdeviceptr)*ptr, handleSize, AMEM_TYPE_CUMEM_LOCAL_FABRIC, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_FABRIC);
+    } else {
+      amem_addAllocInfo((CUdeviceptr)*ptr, handleSize, AMEM_TYPE_CUMEM_LOCAL_POSIX, currentDev, handle, -1, 0, NULL, AMEM_CALLER_NCCL_POSIX);
+    }
+    #endif
+
     /* Now allow RW access to the newly mapped memory */
     for (int i = 0; i < dcnt; ++i) {
       int p2p = 0;
@@ -2395,3 +2405,49 @@ exit:
 fail:
   goto exit;
 }
+
+#ifdef AMEM_PLUGIN
+NCCL_API(ncclResult_t, ncclPause, ncclComm_t *comm);
+ncclResult_t ncclPause(ncclComm_t* comm) {
+  ncclResult_t ret = ncclSuccess;
+  NVTX3_FUNC_RANGE_IN(nccl_domain);
+   
+  amem_memPause(getpid(), 0);
+  TRACE_CALL("ncclPause()");
+  return ret;
+};
+
+NCCL_API(ncclResult_t, ncclResume, ncclComm_t * comm);
+ncclResult_t ncclResume(ncclComm_t* comm) {
+  ncclResult_t ret = ncclSuccess;
+  NVTX3_FUNC_RANGE_IN(nccl_domain);
+
+  amem_memResume(getpid(), 0);
+  TRACE_CALL("ncclResume()");
+
+  return ret;
+}
+
+NCCL_API(ncclResult_t, ncclMemStats);
+ncclResult_t ncclMemStats() {
+  ncclResult_t ret = ncclSuccess;
+  NVTX3_FUNC_RANGE_IN(nccl_domain);
+
+  amem_dumpAllocStats();
+  TRACE_CALL("ncclMemStats()");
+
+  return ret;
+}
+
+NCCL_API(ncclResult_t, ncclSetGroupID, int);
+ncclResult_t ncclSetGroupID(int id) {
+  int ret_ = amem_setGroupID(id);
+  return (ncclResult_t) ret_;
+}
+
+NCCL_API(ncclResult_t, ncclGetGroupID, int*);
+ncclResult_t ncclGetGroupID(int *id) {
+  amem_getGroupID(id);
+  return ncclSuccess;
+}
+#endif

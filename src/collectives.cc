@@ -79,6 +79,9 @@ NCCL_API(ncclResult_t, ncclAllGather, const void* sendbuff, void* recvbuff, size
 ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
   comm->ncclFuncTimes ++;
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   // Just pass the size of one message and not the total bytes sent/received.
   NVTX3_FUNC_WITH_PARAMS(AllGather, NcclNvtxParamsAllGather,
     NVTX3_PAYLOAD(comm ? comm->commHash : 0, sendcount * ncclTypeSize(datatype)));
@@ -95,6 +98,9 @@ NCCL_API(ncclResult_t, ncclAllReduce, const void* sendbuff, void* recvbuff, size
 ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream) {
   comm->ncclFuncTimes ++;
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   NVTX3_FUNC_WITH_PARAMS(AllReduce, NcclNvtxParamsAllReduce,
     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), op));
 
@@ -110,6 +116,9 @@ NCCL_API(ncclResult_t, ncclBroadcast, const void* sendbuff, void* recvbuff, size
 ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
     ncclComm_t comm, cudaStream_t stream) {
   comm->ncclFuncTimes ++;
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   NVTX3_FUNC_WITH_PARAMS(Broadcast, NcclNvtxParamsBroadcast,
     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), root));
 
@@ -132,6 +141,9 @@ NCCL_API(ncclResult_t, ncclReduce, const void* sendbuff, void* recvbuff, size_t 
 ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
   comm->ncclFuncTimes ++;
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   NVTX3_FUNC_WITH_PARAMS(Reduce, NcclNvtxParamsReduce,
     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), root, op));
 
@@ -147,6 +159,9 @@ NCCL_API(ncclResult_t, ncclReduceScatter, const void* sendbuff, void* recvbuff, 
 ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recvcount,
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream) {
   comm->ncclFuncTimes ++;
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   NVTX3_FUNC_WITH_PARAMS(ReduceScatter, NcclNvtxParamsReduceScatter,
     NVTX3_PAYLOAD(comm ? comm->commHash : 0, recvcount * ncclTypeSize(datatype), op));
 
@@ -163,6 +178,9 @@ NCCL_API(ncclResult_t, ncclSend, const void* sendbuff, size_t count, ncclDataTyp
 ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer,
     ncclComm_t comm, cudaStream_t stream) {
   comm->ncclFuncTimes ++;
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   NVTX3_FUNC_WITH_PARAMS(Send, NcclNvtxParamsSendRecv,
     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), peer));
 
@@ -182,6 +200,9 @@ NCCL_API(ncclResult_t, ncclRecv, void* recvbuff, size_t count, ncclDataType_t da
 ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer,
     ncclComm_t comm, cudaStream_t stream) {
   comm->ncclFuncTimes ++;
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   NVTX3_FUNC_WITH_PARAMS(Recv, NcclNvtxParamsSendRecv,
     NVTX3_PAYLOAD(comm ? comm->commHash : 0, count * ncclTypeSize(datatype), peer));
   if(ncclParamPsmForceZeroCopy()) {

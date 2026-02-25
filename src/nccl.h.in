@@ -472,6 +472,22 @@ ncclResult_t pncclGroupEnd();
 ncclResult_t  ncclGroupSimulateEnd(ncclSimInfo_t* simInfo);
 ncclResult_t pncclGroupSimulateEnd(ncclSimInfo_t* simInfo);
 
+/*
+ * NCCL Pause()/Resume() APIs by AMem NCCL-plugin that release (then re-alloc) phy GPU memory while keeping dptr unchanged
+ * Pause(): offload (P2P buffer is optional) then release phy addr including references from peer, virtual dptr keep intact
+ * Resume(): basically redo, e.g., alloc new phy addr, remap to existing dptr, preload data, notifer peer etc, thus everything is restored
+ * Notes:
+ * - both APIs are blocked until all release/offload/preload run to complete
+ * - APIs shall be invoked in-order and in-pair e.g. Pause() then Resume()
+ * - for inter-GPU state consistency, it shall be handled by caller frameworks like SGLang, Megatron-LM etc
+ * - input argument comm currently is unused, just set as NULL
+*/
+ncclResult_t ncclPause(ncclComm_t *comm = NULL);
+ncclResult_t ncclResume(ncclComm_t *comm = NULL);
+ncclResult_t ncclMemStats();
+ncclResult_t ncclSetGroupID(int id);
+ncclResult_t ncclGetGroupID(int *id);
+
 #ifdef __cplusplus
 } // end extern "C"
 #endif

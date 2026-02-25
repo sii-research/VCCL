@@ -91,6 +91,9 @@ ncclResult_t ncclAsyncJobComplete(struct ncclAsyncJob* job) {
 
 NCCL_API(ncclResult_t, ncclGroupStart);
 ncclResult_t ncclGroupStart() {
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   ncclResult_t ret = ncclSuccess;
   NVTX3_FUNC_RANGE_IN(nccl_domain);
 
@@ -101,6 +104,9 @@ ncclResult_t ncclGroupStart() {
 
 NCCL_API(ncclResult_t, ncclGroupEnd);
 ncclResult_t ncclGroupEnd() {
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   ncclResult_t ret = ncclSuccess;
   NVTX3_FUNC_RANGE_IN(nccl_domain);
   NCCLCHECKGOTO(ncclGroupEndInternal(), ret, exit);
@@ -111,6 +117,9 @@ exit:
 
 NCCL_API(ncclResult_t, ncclGroupSimulateEnd, ncclSimInfo_t* simInfo);
 ncclResult_t ncclGroupSimulateEnd(ncclSimInfo_t* simInfo) {
+#ifdef AMEM_PLUGIN
+  amem_checkPaused();
+#endif
   ncclResult_t ret = ncclSuccess;
   NVTX3_FUNC_RANGE_IN(nccl_domain);
   NCCLCHECKGOTO(ncclGroupEndInternal(simInfo), ret, exit);
