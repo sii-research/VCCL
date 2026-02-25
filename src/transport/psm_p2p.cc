@@ -104,6 +104,8 @@ struct p2pCuMemProxyInfo {
   struct ncclP2pBuff p2pBuff;
 };
 
+extern int64_t ncclParamLowMemoryMode();
+
 #include <sys/types.h>
 
 // NCCL_PARAM(LegacyCudaRegister, "LEGACY_CUDA_REGISTER", 0);
@@ -387,7 +389,7 @@ ncclResult_t psmP2pSendSetup(struct ncclComm* comm, struct ncclTopoGraph* graph,
 
   int sendSize = sizeof(struct ncclSendMem);
   // For P2P Read the SIMPLE buffer is tagged on the end of the ncclSendMem structure
-  if (info->read) sendSize += comm->buffSizes[NCCL_PROTO_SIMPLE];
+  if (info->read && !ncclParamLowMemoryMode()) sendSize += comm->buffSizes[NCCL_PROTO_SIMPLE];
   ALIGN_SIZE(sendSize, CUDA_IPC_MIN);
 
   if (intermediateRank == -1) {
@@ -456,7 +458,7 @@ ncclResult_t psmP2pRecvSetup(struct ncclComm* comm, struct ncclTopoGraph* graph,
   int recvSize = sizeof(struct ncclRecvMem);
   // For P2P Read the SIMPLE buffer is tagged on the end of the ncclSendMem structure
   for (int p=0; p<NCCL_NUM_PROTOCOLS; p++) if (!(info->read && p == NCCL_PROTO_SIMPLE)) recvSize += comm->buffSizes[p];
-  if(ncclParamPassSm()) recvSize += PSM_BUFFER_SIZE;
+  if(ncclParamPassSm() && !ncclParamLowMemoryMode()) recvSize += PSM_BUFFER_SIZE;
   ALIGN_SIZE(recvSize, CUDA_IPC_MIN);
 
   if (intermediateRank == -1) {
