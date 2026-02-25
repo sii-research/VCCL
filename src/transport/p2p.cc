@@ -941,7 +941,7 @@ ncclResult_t ret = ncclSuccess;
           needUpdate = true;
           *regBufFlag = 1;
 #ifdef AMEM_PLUGIN
-          amem_addPeerInfo(regRecord->begAddr, (CUdeviceptr)rmtRegAddr, peerRank);
+          amem_addPeerInfo(regRecord->addr, (CUdeviceptr)rmtRegAddr, peerRank);
 #endif
           INFO(NCCL_REG, "rank %d - IPC registered buffer %p size %ld (baseAddr %p size %ld) to peer %d regAddr %p offsetOut %ld", comm->rank, userbuff, buffSize, (void*)regRecord->addr, ipcInfo.size, peerRank, rmtRegAddr, (uintptr_t)userbuff - regRecord->addr);
         }
