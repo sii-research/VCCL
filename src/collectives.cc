@@ -9,6 +9,7 @@
 #include "enqueue.h"
 #include "nccl.h"
 #include "nvtx_payload_schemas.h"
+#include "utils.h"
 #include <stdio.h> // todo, just for test, need to remove in future
 
 const char* ncclFuncToString(ncclFunc_t fn) {
@@ -114,6 +115,9 @@ NCCL_API(ncclResult_t, ncclAlltoAllv, const void* sendbuff, const size_t* sendco
 ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
     const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
     void* relaybuff, size_t relaycounts, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
+  int64_t logId = 0;
+  NCCLCHECK(getRandomData(&logId, sizeof(logId)));
+
   // Calculate total send bytes for current rank: sum of all sendcounts for this rank
   size_t totalBytes = 0;
   if (comm && sendcounts) {
@@ -124,11 +128,11 @@ ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
     }
   }
   NVTX3_FUNC_WITH_PARAMS(AlltoAllv, NcclNvtxParamsAlltoAllv,
-    NVTX3_PAYLOAD(comm ? comm->commHash : 0, totalBytes));
+    NVTX3_PAYLOAD(comm ? comm->commHash : 0, totalBytes, logId));
   struct ncclInfo info = { ncclFuncAlltoAllV, "AlltoAllv",
     sendbuff, recvbuff, 0, datatype, ncclSum, 0, comm, stream, /* Args */
     0, 0, 0, nullptr, 0, 0, 0, 0, nullptr,
-    sendcounts, sdispls, recvcounts, rdispls, relaybuff, relaycounts};
+    sendcounts, sdispls, recvcounts, rdispls, relaybuff, relaycounts, logId};
   return ncclEnqueueCheck(&info);
 }
 

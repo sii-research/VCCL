@@ -44,6 +44,7 @@ struct ncclInfo {
   const size_t* rdispls;
   void* relaybuff;
   size_t relaycounts;
+  int64_t logId;
 };
 
 #endif

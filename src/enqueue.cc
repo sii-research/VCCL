@@ -2964,6 +2964,7 @@ ncclResult_t rmaCollTaskAppend(
   // Create a single task node containing the entire info
   struct ncclTaskRmaColl* t = ncclMemoryPoolAlloc<struct ncclTaskRmaColl>(&comm->memPool_ncclTaskRmaColl, &comm->memPermanent);
   t->func = info->coll;
+  t->logId = info->logId;
   t->sendWin = sendWin;
   t->sendWinOffset = sendWinOffset;
   t->recvWin = recvWin;

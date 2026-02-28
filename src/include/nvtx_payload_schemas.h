@@ -31,6 +31,7 @@ static constexpr char const* nccl_nvtxCudaDevStr = "CUDA device";
 static constexpr char const* nccl_nvtxRankStr = "Rank";
 static constexpr char const* nccl_nvtxNranksStr = "No. of ranks";
 static constexpr char const* nccl_nvtxMsgSizeStr = "Message size [bytes]";
+static constexpr char const* nccl_nvtxLogIdStr = "Log ID";
 static constexpr char const* nccl_nvtxReductionOpStrpStr = "Reduction operation";
 
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsCommInitAll, static constexpr,
@@ -111,7 +112,8 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsAlltoAll, static const
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsAlltoAllv, static constexpr,
   NCCL_NVTX_PAYLOAD_ENTRIES(
     (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
-    (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr)
+    (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr),
+    (int64_t, logid, TYPE_INT64, nccl_nvtxLogIdStr)
   )
 )
 
@@ -187,7 +189,8 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsIntRma, static constex
     (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),
     (size_t, bytes, TYPE_SIZE, nccl_nvtxMsgSizeStr),
     (int, peer, TYPE_INT, "Peer rank"),
-    (int, ctx, TYPE_INT, "Context ID")
+    (int, ctx, TYPE_INT, "Context ID"),
+    (int64_t, logid, TYPE_INT64, nccl_nvtxLogIdStr)
   )
 )
 

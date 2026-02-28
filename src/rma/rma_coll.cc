@@ -383,6 +383,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
               struct ncclTaskRma* cePutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
               cePutTask->func = ncclFuncPutSignal;
+              cePutTask->logId = task->logId;
               cePutTask->ctx = 0;
               cePutTask->count = chunkBytes / sched.eltSize;
               cePutTask->datatype = task->datatype;
@@ -417,6 +418,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         if (nPeersWithSignals > 0) {
           struct ncclTaskRma* ceWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
           ceWaitTask->func = ncclFuncWaitSignal;
+          ceWaitTask->logId = task->logId;
           ceWaitTask->ctx = 0;
           ceWaitTask->bytes = 0;
           ceWaitTask->srcBuff = NULL;
@@ -462,6 +464,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
             struct ncclTaskRma* cePutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
             cePutTask->func = ncclFuncPutSignal;
+            cePutTask->logId = task->logId;
             cePutTask->ctx = 0;
             cePutTask->count = chunkBytes / sched.eltSize;
             cePutTask->datatype = task->datatype;
@@ -502,6 +505,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         if (nPeersWithSignals > 0) {
           struct ncclTaskRma* ceWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
           ceWaitTask->func = ncclFuncWaitSignal;
+          ceWaitTask->logId = task->logId;
           ceWaitTask->ctx = 0;
           ceWaitTask->bytes = 0;
           ceWaitTask->srcBuff = NULL;
@@ -544,6 +548,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
           if (nSignalsFromRecvRankSameRail > 0) {
             struct ncclTaskRma* proxyWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
             proxyWaitTask->func = ncclFuncWaitSignal;
+            proxyWaitTask->logId = task->logId;
             proxyWaitTask->ctx = 0;
             proxyWaitTask->bytes = 0;
             proxyWaitTask->srcBuff = NULL;
@@ -587,6 +592,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
 
                 struct ncclTaskRma* proxyPutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
                 proxyPutTask->func = ncclFuncPutSignal;
+                proxyPutTask->logId = task->logId;
                 proxyPutTask->ctx = 0;
                 proxyPutTask->count = chunkBytes / sched.eltSize;
                 proxyPutTask->datatype = task->datatype;

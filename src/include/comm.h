@@ -267,6 +267,7 @@ struct ncclTaskP2p {
 struct ncclTaskRma {
   struct ncclTaskRma* next;
   ncclFunc_t func;
+  int64_t logId;
   int ctx;
   size_t count;
   ncclDataType_t datatype;
@@ -297,6 +298,7 @@ struct ncclTaskRma {
 struct ncclTaskRmaColl {
   struct ncclTaskRmaColl* next;
   ncclFunc_t func;
+  int64_t logId;
 
   // Window info for send buffer
   struct ncclDevrWindow* sendWin;

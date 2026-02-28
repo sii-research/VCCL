@@ -332,7 +332,7 @@ static ncclResult_t ncclRmaProxyPollDesc(ncclGin_t *ncclGin, struct ncclRmaProxy
       // Issue NVTX3_RANGE_WITH_PARAMS
       pendingDesc->nvtxRange = new ncclOptionalNvtxPayloadRangeWithId<NcclNvtxParamsIntRma>;
       NVTX3_RANGE_WITH_PARAMS((*pendingDesc->nvtxRange), IntRMA, NcclNvtxParamsIntRma,
-      NVTX3_PAYLOAD(ctx->comm ? ctx->comm->commHash : 0, pendingDesc->size, pendingDesc->targetRank, -1));
+      NVTX3_PAYLOAD(ctx->comm ? ctx->comm->commHash : 0, pendingDesc->size, pendingDesc->targetRank, -1, pendingDesc->logId));
 
       // Issue the network operation
       if (pendingDesc->signal.op == 0) {
@@ -716,6 +716,7 @@ ncclResult_t ncclRmaPutProxy(struct ncclComm* comm, struct ncclKernelPlan* plan,
     desc->size = task->count * ncclTypeSize(task->datatype);
     desc->targetRank = task->peer;
     desc->seq = rmaProxyCtx->opSeqs[task->peer]++;
+    desc->logId = task->logId;
     desc->rmaDescState = ncclRmaDescStatePending;
     desc->request = NULL;
 

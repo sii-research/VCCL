@@ -47,6 +47,7 @@ struct ncclRmaProxyDesc {
 
   // Sequence number for the network operation
   uint64_t seq;
+  int64_t logId;
 
   // State of the network function descriptor
   ncclRmaDescState_t rmaDescState;
