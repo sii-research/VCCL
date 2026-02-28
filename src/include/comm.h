@@ -333,6 +333,8 @@ struct ncclTaskRmaColl {
 // The ncclRmaWorkBatch of the same ncclTaskRmaColl run in serial.
 struct ncclRmaWorkBatch {
   struct ncclRmaWorkBatch* next;
+  int batchIdx;
+  int64_t logId;
   int nProxyPut; // number of ncclTaskRma elements in proxyPutQueue
   int nProxyWaitSignal;
   int nCePut;

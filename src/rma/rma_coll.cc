@@ -8,6 +8,7 @@
 #include "alloc.h"
 #include "checks.h"
 #include "comm.h"
+#include "nvtx_payload_schemas.h"
 #include "param.h"
 #include "rma/rma.h"
 #include <functional>
@@ -191,6 +192,11 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
   // Iterate through each RMA work batch
   struct ncclRmaWorkBatch* batch = ncclIntruQueueHead(&plan->rmaWorkBatchQueue);
   while (batch != nullptr) {
+    NVTX3_FUNC_WITH_PARAMS(RmaColl, NcclNvtxParamsRmaColl,
+      NVTX3_PAYLOAD(batch->logId, batch->batchIdx,
+                    batch->nProxyPut, batch->nProxyWaitSignal,
+                    batch->nCePut, batch->nCeWaitSignal));
+
     //For debugging: dump RMA work batch
     // if (comm->rank != 0) {
     //   dumpRmaWorkBatch(batch, comm->rank);
@@ -261,6 +267,8 @@ fail:
 static ncclResult_t allocRmaWorkBatch(struct ncclComm* comm, struct ncclRmaWorkBatch** batchOut) {
   struct ncclRmaWorkBatch* batch = ncclMemoryPoolAlloc<struct ncclRmaWorkBatch>(&comm->memPool_ncclRmaWorkBatch, &comm->memPermanent);
   batch->next = nullptr;
+  batch->batchIdx = 0;
+  batch->logId = 0;
   batch->nProxyPut = 0;
   batch->nProxyWaitSignal = 0;
   batch->nCePut = 0;
@@ -356,6 +364,8 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
     void* sendBuff = (char*)task->sendWin->userPtr + task->sendWinOffset;
 
     while (curBatch != nullptr) {
+      curBatch->batchIdx = batchIdx;
+      curBatch->logId = task->logId;
       // CE Part: intraNode communication
       if (batchIdx == 0) {
         // Batch 0: nodeRound 0 (pure intraNode, all local ranks)

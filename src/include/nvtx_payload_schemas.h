@@ -117,6 +117,17 @@ NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsAlltoAllv, static cons
   )
 )
 
+NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsRmaColl, static constexpr,
+  NCCL_NVTX_PAYLOAD_ENTRIES(
+    (int64_t, logid, TYPE_INT64, nccl_nvtxLogIdStr),
+    (int, batchIndex, TYPE_INT, "Batch index"),
+    (int, nProxyPut, TYPE_INT, "No. of ProxyPut ops"),
+    (int, nProxyWaitSignal, TYPE_INT, "No. of ProxyWaitSignal ops"),
+    (int, nCePut, TYPE_INT, "No. of CePut ops"),
+    (int, nCeWaitSignal, TYPE_INT, "No. of CeWaitSignal ops")
+  )
+)
+
 NCCL_NVTX_DEFINE_STRUCT_WITH_SCHEMA_ENTRIES(NcclNvtxParamsAllReduce, static constexpr,
   NCCL_NVTX_PAYLOAD_ENTRIES(
     (uint64_t, comm, TYPE_UINT64, nccl_nvtxCommStr),

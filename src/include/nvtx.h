@@ -44,10 +44,11 @@
 #define NVTX_SID_WaitSignal           23
 #define NVTX_SID_AlltoAllv            24
 #define NVTX_SID_IntRMA               25
+#define NVTX_SID_RmaColl              26
 // When adding new schema IDs, DO NOT re-use/overlap with the enum schema ID below!
 
 // Define static schema ID for the reduction operation.
-#define NVTX_PAYLOAD_ENTRY_NCCL_REDOP 26 + NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START
+#define NVTX_PAYLOAD_ENTRY_NCCL_REDOP 27 + NVTX_PAYLOAD_ENTRY_TYPE_SCHEMA_ID_STATIC_START
 
 extern const nvtxDomainHandle_t ncclNvtxDomainHandle;
 
