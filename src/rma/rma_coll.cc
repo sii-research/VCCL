@@ -204,13 +204,13 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
 
     // Record one batch-level start event on main stream and reuse it for all
     // secondary operation launches in this batch.
-    int activeOpTypes = 0;
-    activeOpTypes += (batch->nProxyPut > 0);
-    activeOpTypes += (batch->nProxyWaitSignal > 0);
-    activeOpTypes += (batch->nCePut > 0);
-    activeOpTypes += (batch->nCeWaitSignal > 0);
+    int activeOps = 0;
+    activeOps += (batch->nProxyPut > 0);
+    activeOps += (batch->nProxyWaitSignal > 0);
+    activeOps += batch->nCePut;
+    activeOps += (batch->nCeWaitSignal > 0);
     cudaEvent_t batchStartEvent = nullptr;
-    if (activeOpTypes > 1) {
+    if (activeOps > 1) {
       // Use a dedicated event slot that is not used by per-stream completion sync.
       batchStartEvent = rmaCollState->rmaCollEvent[NCCL_RMA_COLL_MAX_STREAMS - 1];
       CUDACHECKGOTO(cudaEventRecord(batchStartEvent, mainStream), ret, fail);
@@ -239,14 +239,18 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
       batchStartEvent, opCnt), ret, fail);
 
     // 3. CePut
-    NCCLCHECKGOTO(launchRmaOpHelper(comm, rmaCollState, rmaArgs, mainStream,
-      batch->nCePut,
-      ncclRmaPutCe,
-      [&](ncclRmaWork& w) {
-        w.rmaArgs->nRmaTasksCe = batch->nCePut;
-        w.rmaTaskQueueCe = batch->cePutQueue;
-      },
-      batchStartEvent, opCnt), ret, fail);
+    for (int cePutIdx = 0; cePutIdx < batch->nCePut; cePutIdx++) {
+      struct ncclTaskRma* cePutTask = ncclIntruQueueDequeue(&batch->cePutQueue);
+      NCCLCHECKGOTO(launchRmaOpHelper(comm, rmaCollState, rmaArgs, mainStream,
+        1,
+        ncclRmaPutCe,
+        [&](ncclRmaWork& w) {
+          w.rmaArgs->nRmaTasksCe = 1;
+          ncclIntruQueueConstruct(&w.rmaTaskQueueCe);
+          ncclIntruQueueEnqueue(&w.rmaTaskQueueCe, cePutTask);
+        },
+        batchStartEvent, opCnt), ret, fail);
+    }
 
     // 4. CeWaitSignal
     NCCLCHECKGOTO(launchRmaOpHelper(comm, rmaCollState, rmaArgs, mainStream,

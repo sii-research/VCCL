@@ -51,7 +51,7 @@ struct ncclRmaCollArgs {
 // Only rmaArgs, rmaTaskQueueProxy and rmaTaskQueueCe fields are used in ncclRmaWork.
 using ncclRmaWork = ncclKernelPlan;
 
-constexpr int NCCL_RMA_COLL_MAX_STREAMS = 4;
+constexpr int NCCL_RMA_COLL_MAX_STREAMS = 16;
 static_assert(NCCL_RMA_COLL_MAX_STREAMS >= 4, "NCCL_RMA_COLL_MAX_STREAMS must be at least 4");
 struct ncclRmaCollState {
   bool initialized;
