@@ -376,16 +376,16 @@ void ncclDebugLog(ncclDebugLogLevel level, unsigned long flags, const char *file
 
   // Add level specific formatting. The format string from the call site is incorporated into this prefix.
   if (level == NCCL_LOG_WARN) {
-    len += snprintf(buffer+len, sizeof(buffer)-len, "[%d] %s:%d NCCL WARN %s\n", cudaDev, filefunc, line, fmt);
+    len += snprintf(buffer+len, sizeof(buffer)-len, "[%d] %s:%d VCCL WARN %s\n", cudaDev, filefunc, line, fmt);
     if (ncclWarnSetDebugInfo) COMPILER_ATOMIC_STORE(&ncclDebugLevel, NCCL_LOG_INFO, std::memory_order_release);
   } else if (level == NCCL_LOG_INFO) {
-    len += snprintf(buffer+len, sizeof(buffer)-len, "[%d] NCCL INFO %s\n", cudaDev, fmt);
+    len += snprintf(buffer+len, sizeof(buffer)-len, "[%d] VCCL INFO %s\n", cudaDev, fmt);
   } else if (level == NCCL_LOG_TRACE && flags == NCCL_CALL) {
-    len += snprintf(buffer+len, sizeof(buffer)-len, "NCCL CALL %s\n", fmt);
+    len += snprintf(buffer+len, sizeof(buffer)-len, "VCCL CALL %s\n", fmt);
   } else if (level == NCCL_LOG_TRACE) {
     auto delta = std::chrono::steady_clock::now() - ncclEpoch;
     double timestamp = std::chrono::duration_cast<std::chrono::duration<double>>(delta).count()*1000;
-    len += snprintf(buffer+len, sizeof(buffer)-len, "[%d] %f %s:%d NCCL TRACE %s\n", cudaDev, timestamp, filefunc, line, fmt);
+    len += snprintf(buffer+len, sizeof(buffer)-len, "[%d] %f %s:%d VCCL TRACE %s\n", cudaDev, timestamp, filefunc, line, fmt);
   } else {
     len += snprintf(buffer+len, sizeof(buffer)-len, "%s\n", fmt);
   }

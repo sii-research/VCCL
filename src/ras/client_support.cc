@@ -585,7 +585,7 @@ static ncclResult_t rasClientRunInit(struct rasClient* client) {
   // For structured formats (JSON), skip the initial text output.
   // It will be included in the structured output later.
   if (client->outputFormat == RAS_OUTPUT_TEXT) {
-    rasOutAppend("NCCL version " STR(NCCL_MAJOR) "." STR(NCCL_MINOR) "." STR(NCCL_PATCH) NCCL_SUFFIX
+    rasOutAppend("VCCL version " STR(NCCL_MAJOR) "." STR(NCCL_MINOR) "." STR(NCCL_PATCH) NCCL_SUFFIX
                  " compiled with CUDA " STR(CUDA_MAJOR) "." STR(CUDA_MINOR) "\n");
     rasOutAppend("CUDA runtime version %d, driver version %d\n\n", cudaRuntimeVersion, cudaDriverVersion);
     msgLen = rasOutLength();
