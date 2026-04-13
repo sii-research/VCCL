@@ -1,4 +1,4 @@
-<img src="asset/LOGO.svg" alt="VCCL Logo" style="width: 100%; max-width: 100%;">
+<img src="asset/sii-infrawaves-buaa.svg" alt="VCCL Logo" style="width: 100%; max-width: 100%;">
 <br>
 <br>
 <h1 align="center">VCCL: Venus Collective Communication Library</h1>
