@@ -19,6 +19,7 @@
 
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 
 typedef enum : uint8_t {
   ncclPatternRing,
@@ -40,6 +41,11 @@ typedef enum : uint8_t {
 } ncclPattern_t;
 
 enum ncclProxyOpState { ncclProxyOpNone, ncclProxyOpReady, ncclProxyOpProgress };
+
+struct psmSyncCondition {
+  std::atomic<int> proxyReadyEvent;
+  std::atomic<int> proxyOpCount;
+};
 
 struct ncclProxyArgs;
 typedef ncclResult_t (*proxyProgressFunc_t)(struct ncclProxyState*, struct ncclProxyArgs*);
@@ -82,6 +88,7 @@ struct ncclProxyOp {
   uint8_t protocol;
   uint8_t algorithm;
   uint8_t reg;
+  uint8_t regp;
   // collnet/p2p/coll buffer reg handles
   void* sendMhandle;
   void* recvMhandle;
@@ -112,6 +119,7 @@ struct ncclProxyOp {
   pid_t pid;
   void* profilerContext;
   uint64_t workCounter;
+  struct psmSyncCondition* syncCond;
 
   struct ncclProxyOp *enqNext;
 };
@@ -126,6 +134,7 @@ struct ncclProxyEventHandle {
 struct ncclProxySubArgs {
   struct ncclProxyConnection* connection;
   int reg;
+  int regp;
   // collnet handles
   void* sendMhandle;
   void* recvMhandle;
@@ -189,6 +198,7 @@ struct ncclProxyArgs {
   uint8_t /*ncclFunc_t*/ collAPI;
   uint8_t protocol;
   uint8_t algorithm;
+  int reg;
   int state;
   char* sharedBuff[NCCL_STEPS];
   int sharedSize[NCCL_STEPS];
@@ -203,6 +213,7 @@ struct ncclProxyArgs {
   struct ncclProxyArgs** proxyAppendPtr;
 
   union ncclProxyOpSpecifics specifics;
+  struct psmSyncCondition* syncCond;
 };
 #define NCCL_MAX_NETDEVS 128
 

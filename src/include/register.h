@@ -33,6 +33,7 @@ struct ncclRegNetHandles {
   void* handle;
   struct ncclProxyConnector* proxyConn;
   struct ncclRegNetHandles* next;
+  bool psm;
 };
 
 struct ncclReg {

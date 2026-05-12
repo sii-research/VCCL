@@ -10,13 +10,18 @@
 #define ENABLE_TIMER 0
 #include "timer.h"
 #include "transport.h"
+#include <array>
 
-struct ncclTransport* ncclTransports[NTRANSPORTS+1] = {
+NCCL_PARAM(PassSm, "PASS_SM", 0);
+
+struct ncclTransport* ncclTransports[NTRANSPORTS] = {
   &p2pTransport,
   &shmTransport,
   &netTransport,
   &collNetTransport,
-  &profilerTransport // Not really used for transport, only to create proxy ops polling on profiler counters.
+  &profilerTransport, // Not really used for transport, only to create proxy ops polling on profiler counters.
+  &psmP2pTransport,
+  &psmNetTransport
 };
 
 template <int type>
@@ -25,7 +30,16 @@ static ncclResult_t selectTransport(struct ncclComm* comm, struct ncclTopoGraph*
   struct ncclPeerInfo* peerInfo = comm->peerInfo+peer;
   struct ncclConnector* connector = (type == 1) ? comm->channels[channelId].peers[peer]->send + connIndex :
                                                   comm->channels[channelId].peers[peer]->recv + connIndex;
-  for (int t=0; t<NTRANSPORTS; t++) {
+  static constexpr std::array<int, 4> defaultTransports = {
+    TRANSPORT_P2P, TRANSPORT_SHM, TRANSPORT_NET, TRANSPORT_COLLNET
+  };
+  static constexpr std::array<int, 2> passSmTransports = {
+    TRANSPORT_PSM_P2P, TRANSPORT_PSM_NET
+  };
+  bool passSm = ncclParamPassSm() && connIndex == 1;
+  int nTransports = passSm ? passSmTransports.size() : defaultTransports.size();
+  for (int i=0; i<nTransports; i++) {
+    int t = passSm ? passSmTransports[i] : defaultTransports[i];
     struct ncclTransport *transport = ncclTransports[t];
     struct ncclTransportComm* transportComm = type == 1 ? &transport->send : &transport->recv;
     int ret = 0;

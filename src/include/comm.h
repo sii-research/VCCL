@@ -327,6 +327,13 @@ struct ncclTaskRmaColl {
   void* eventHandle;
 };
 
+struct psmSelfCopy {
+  struct psmSelfCopy* next;
+  void* dst;
+  const void* src;
+  size_t bytes;
+};
+
 // A RMA work batch is a batch of RMA operations that are executed in full parallelism.
 // A ncclTaskRmaColl will be split into multiple work batches if there are too many RMA operations to fit into one batch.
 // All ncclTaskRma inside a work batch are executed in parallel if possible.
@@ -384,12 +391,14 @@ struct ncclKernelPlan {
   void* workBufPersistent;
 
   struct ncclIntruQueue<struct ncclTaskP2p, &ncclTaskP2p::next> p2pTaskQueue;
+  struct ncclIntruQueue<struct psmSelfCopy, &psmSelfCopy::next> pscTaskQueue;
   struct ncclIntruQueue<struct ncclTaskBcast, &ncclTaskBcast::next> bcastTaskQueue;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueProxy;
   struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next> rmaTaskQueueCe;
   struct ncclIntruQueue<struct ncclRmaWorkBatch, &ncclRmaWorkBatch::next> rmaWorkBatchQueue;
   struct ncclIntruQueue<struct ncclTaskColl, &ncclTaskColl::next> collTaskQueue;
   struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
+  struct psmSyncCondition* syncCondition;
 
   // Profiler plugin
   void* groupApiEventHandle;

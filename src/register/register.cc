@@ -10,6 +10,8 @@
 #include "net.h"
 #include "register.h"
 #include "transport.h"
+
+NCCL_PARAM(PsmForceZeroCopy, "PSM_FORCE_ZEROCOPY", 0);
 #include "group.h"
 
 NCCL_PARAM(LocalRegister, "LOCAL_REGISTER", 1);
@@ -68,8 +70,10 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
     struct ncclRegNetHandles* netHandle = reg->netHandleHead;
     struct ncclRegNetHandles* netHandlePrev;
     while(netHandle) {
-      if (ncclNetDeregBuffer(comm, netHandle->proxyConn, netHandle->handle) != ncclSuccess) {
-        WARN("rank %d deregister NET buffer handle %p proxy rank %d failed\n", comm->rank, netHandle->handle, netHandle->proxyConn->rank);
+      if (!(netHandle->psm && ncclParamPsmForceZeroCopy())) {
+        if (ncclNetDeregBuffer(comm, netHandle->proxyConn, netHandle->handle) != ncclSuccess) {
+          WARN("rank %d deregister %s buffer handle %p proxy rank %d failed\n", comm->rank, netHandle->psm ? "PSM_NET" : "NET", netHandle->handle, netHandle->proxyConn->rank);
+        }
       }
       netHandlePrev = netHandle;
       netHandle = netHandle->next;
@@ -90,8 +94,10 @@ static ncclResult_t regCleanup(struct ncclComm* comm, struct ncclReg* reg) {
   if (reg->state & IPC_REG_COMPLETE) {
     for (int i = 0; i < NCCL_MAX_LOCAL_RANKS; ++i)
       if (reg->ipcInfos[i]) {
-        if (ncclIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
-          WARN("rank %d deregister IPC buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
+        if (!(reg->ipcInfos[i]->psm && ncclParamPsmForceZeroCopy())) {
+          if (ncclIpcDeregBuffer(comm, reg->ipcInfos[i]) != ncclSuccess) {
+            WARN("rank %d deregister %s buffer %p peerRank %d failed", comm->rank, reg->ipcInfos[i]->psm ? "PSM_P2P IPC" : "IPC", reg->ipcInfos[i]->baseAddr, reg->ipcInfos[i]->peerRank);
+          }
         }
         free(reg->ipcInfos[i]);
       }

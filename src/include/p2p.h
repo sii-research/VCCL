@@ -57,6 +57,7 @@ struct ncclIpcRegInfo {
   void* baseAddr;
   struct ncclProxyConnector* ipcProxyconn;
   struct ncclIpcImpInfo impInfo;
+  bool psm;
 };
 
 ncclResult_t ncclP2pAllocateShareableBuffer(size_t size, int directMap, ncclIpcDesc *ipcDesc, void **ptr);

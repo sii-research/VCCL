@@ -590,6 +590,7 @@ ncclResult_t ncclTopoGetIntermediateRank(struct ncclTopoSystem* system, int rank
 }
 
 NCCL_PARAM(PxnDisable, "PXN_DISABLE", 0);
+int64_t ncclParamPassSm();
 
 // Net v4 plugins don't have non-blocking connect/accept. We can't therefore use
 // remote proxies without risking deadlocks
@@ -600,6 +601,9 @@ int ncclPxnDisable(struct ncclComm* comm) {
     if (comm && comm->ncclNetVer == 4) {
       INFO(NCCL_INIT, "PXN Disabled as plugin is v4");
       pxnDisable = 1;
+    } else if (ncclParamPassSm()) {
+      pxnDisable = 1;
+      INFO(NCCL_INIT, "PXN Disabled because NCCL_PASS_SM=1");
     } else {
       pxnDisable = ncclParamPxnDisable();
     }

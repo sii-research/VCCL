@@ -377,6 +377,7 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   sub->isOneRPN = op->isOneRPN;
   sub->peer = op->peer;
   sub->reg = op->reg;
+  sub->regp = op->regp;
   sub->sendMhandle = op->sendMhandle;
   sub->recvMhandle = op->recvMhandle;
   sub->sendbuff = op->sendbuff;
@@ -420,12 +421,14 @@ static ncclResult_t ncclProxyOpToArgs(struct ncclProxyOp* op, struct ncclProxyAr
   args->coll = op->coll;
   args->collAPI = op->collAPI;
   args->algorithm = op->algorithm;
+  args->reg = op->reg || op->regp;
   args->nChannels = op->nChannels;
   args->nPeers = op->nPeers;
   args->specifics = op->specifics;
   args->state = ncclProxyOpReady;
   args->progress = op->connection->tcomm->proxyProgress;
   args->proxyAppendPtr = op->connection->proxyAppendPtr;
+  args->syncCond = op->syncCond;
 exit:
   if (args->pattern != ncclPatternProfiler) ncclProfilerStartProxyOpEvent(subIndex, args);
   return ncclSuccess;
@@ -579,6 +582,7 @@ static ncclResult_t SaveProxy(struct ncclComm* comm, struct ncclChannel* channel
   if (justInquire) *justInquire = true;
   else {
     op->peer = peer;
+    op->rank = comm->rank;
     NCCLCHECK(ncclLocalOpAppend(comm, &connector->proxyConn, op));
   }
   return ncclSuccess;
@@ -1239,7 +1243,7 @@ ncclResult_t ncclProxyClientGetFdBlocking(struct ncclComm* comm, int proxyRank, 
 
   // Request the allocation of a UDS fd for the handle
   if (comm->gproxyConn[proxyRank].initialized == false) {
-    NCCLCHECKGOTO(ncclProxyConnect(comm, TRANSPORT_P2P, 1, proxyRank, &comm->gproxyConn[proxyRank]), ret, error);
+    NCCLCHECKGOTO(ncclProxyConnect(comm, ncclParamPassSm() ? TRANSPORT_PSM_P2P : TRANSPORT_P2P, 1, proxyRank, &comm->gproxyConn[proxyRank]), ret, error);
   }
   NCCLCHECKGOTO(ncclProxyCallBlockingUDS(comm, &comm->gproxyConn[proxyRank], ncclProxyMsgGetFd, handle, sizeof(CUmemGenericAllocationHandle), NULL, 0, NULL, convertedFd), ret, error);
 
