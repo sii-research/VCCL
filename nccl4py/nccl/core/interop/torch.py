@@ -47,22 +47,15 @@ except ImportError:
     _torch_enabled = False
 
 
-def _to_nccl_dtype(torch_dtype) -> NcclDataType:
-    """
-    Converts PyTorch dtype to NcclDataType.
+# ── Module-level cached dtype mapping (built once at import time) ──────────
+# This avoids rebuilding the dict + running hasattr checks on every call.
+_torch_to_nccl: dict | None = None
+_unsupported_dtypes: set | None = None
 
-    Args:
-        - torch_dtype (torch.dtype): PyTorch data type.
 
-    Returns:
-        ``NcclDataType``: Corresponding NCCL data type (global constant).
-
-    Raises:
-        - ``ModuleNotFoundError``: If PyTorch is not installed.
-        - ``NcclInvalid``: If torch_dtype has no NCCL equivalent.
-    """
-    if not _torch_enabled:
-        raise ModuleNotFoundError("PyTorch is not installed")
+def _build_dtype_maps() -> None:
+    """Build the torch→nccl dtype mapping once and cache at module level."""
+    global _torch_to_nccl, _unsupported_dtypes
 
     _torch_to_nccl = {
         # Float types (all NCCL-supported)
@@ -111,23 +104,46 @@ def _to_nccl_dtype(torch_dtype) -> NcclDataType:
         if hasattr(torch, qtype):
             _unsupported_dtypes.add(getattr(torch, qtype))
 
-    # Check if dtype is explicitly unsupported
+
+if _torch_enabled:
+    _build_dtype_maps()
+
+
+def _to_nccl_dtype(torch_dtype) -> NcclDataType:
+    """
+    Converts PyTorch dtype to NcclDataType.
+
+    Args:
+        - torch_dtype (torch.dtype): PyTorch data type.
+
+    Returns:
+        ``NcclDataType``: Corresponding NCCL data type (global constant).
+
+    Raises:
+        - ``ModuleNotFoundError``: If PyTorch is not installed.
+        - ``NcclInvalid``: If torch_dtype has no NCCL equivalent.
+    """
+    if not _torch_enabled:
+        raise ModuleNotFoundError("PyTorch is not installed")
+
+    # Fast path: single dict lookup (covers >99% of calls)
+    result = _torch_to_nccl.get(torch_dtype)
+    if result is not None:
+        return result
+
+    # Slow path: check if explicitly unsupported
     if torch_dtype in _unsupported_dtypes:
         raise NcclInvalid(
             f"Unsupported data type: torch dtype {torch_dtype} has no NCCL equivalent. "
             f"NCCL does not support complex, int16, or quantized types."
         )
 
-    # Check if dtype is supported
-    if torch_dtype in _torch_to_nccl:
-        return _torch_to_nccl[torch_dtype]
-    else:
-        # Unknown dtype - list what we do support
-        supported_list = [str(dt) for dt in sorted(_torch_to_nccl.keys(), key=str)]
-        raise NcclInvalid(
-            f"Unknown torch dtype {torch_dtype}. "
-            f"Supported types: {', '.join(supported_list[:12])}..."
-        )
+    # Unknown dtype - list what we do support
+    supported_list = [str(dt) for dt in sorted(_torch_to_nccl.keys(), key=str)]
+    raise NcclInvalid(
+        f"Unknown torch dtype {torch_dtype}. "
+        f"Supported types: {', '.join(supported_list[:12])}..."
+    )
 
 
 def _parse_device(device: torch.device | int | str | None) -> int:

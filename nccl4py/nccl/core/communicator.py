@@ -1224,113 +1224,28 @@ class Communicator:
 
     def alltoallv(
         self,
-        sendbuf: NcclBufferSpec,
-        recvbuf: NcclBufferSpec,
-        sendcounts: Sequence[int],
-        sdispls: Sequence[int],
-        recvcounts: Sequence[int],
-        rdispls: Sequence[int],
-        relaybuf: NcclBufferSpec | None = None,
+        sendbuf_ptr: int,
+        recvbuf_ptr: int,
+        sendcounts: _np.ndarray,
+        sdispls:    _np.ndarray,
+        recvcounts: _np.ndarray,
+        rdispls:    _np.ndarray,
+        dtype: NcclDataType,
+        relay_ptr: int = 0,
+        relay_count: int = 0,
         *,
         stream: NcclStreamSpec | None = None,
     ) -> None:
-        """
-        Each rank sends variable counts to all other ranks and receives variable counts.
-
-        Args:
-            - sendbuf (NcclBufferSpec): Source buffer containing the concatenated send data.
-            - recvbuf (NcclBufferSpec): Destination buffer for received data.
-        - sendcounts (Sequence[int]): Elements to send to each rank (length == nranks*nranks).
-        - sdispls (Sequence[int]): Element displacements in sendbuf (length == nranks*nranks).
-        - recvcounts (Sequence[int]): Elements expected from each rank (length == nranks*nranks).
-        - rdispls (Sequence[int]): Element displacements in recvbuf (length == nranks*nranks).
-            - relaybuf (NcclBufferSpec | None): Optional relay buffer. Defaults to None.
-                When provided, relay count is derived from the buffer size (relay.count).
-            - stream (NcclStreamSpec, optional): CUDA stream for the operation. Defaults to None.
-
-        """
-        self._check_valid("alltoallv")
-
-        s, r = NcclBuffer(sendbuf), NcclBuffer(recvbuf)
-        self._validate_buffer_device(s, "sendbuf")
-        self._validate_buffer_device(r, "recvbuf")
-
-        if s.dtype != r.dtype:
-            raise NcclInvalid(
-                f"Dtype mismatch: sendbuf has dtype {s.dtype}, recvbuf has dtype {r.dtype}"
-            )
-
-        relay = None
-        if relaybuf is not None:
-            relay = NcclBuffer(relaybuf)
-            self._validate_buffer_device(relay, "relaybuf")
-            if relay.dtype != s.dtype:
-                raise NcclInvalid(
-                    f"Dtype mismatch: relaybuf has dtype {relay.dtype}, expected {s.dtype}"
-                )
-
-        sendcounts_arr = _np.asarray(sendcounts, dtype=_np.int64)
-        sdispls_arr = _np.asarray(sdispls, dtype=_np.int64)
-        recvcounts_arr = _np.asarray(recvcounts, dtype=_np.int64)
-        rdispls_arr = _np.asarray(rdispls, dtype=_np.int64)
-
-        def _parse_counts_displs(counts, displs, label):
-            if counts.ndim != 1 or displs.ndim != 1:
-                raise NcclInvalid(f"{label} must be 1D arrays, got counts:{counts.ndim} and displs:{displs.ndim}")
-            expected = self.nranks * self.nranks
-            if counts.size != expected or displs.size != expected:
-                raise NcclInvalid(
-                    f"{label} must have length {expected}, got counts:{counts.size} and displs:{displs.size}"
-                )
-            counts_mat = counts.reshape(self.nranks, self.nranks)
-            displs_mat = displs.reshape(self.nranks, self.nranks)
-            return counts, displs, counts_mat[self.rank], displs_mat[self.rank]
-
-        sendcounts_arr, sdispls_arr, sendcounts_row, sdispls_row = _parse_counts_displs(
-            sendcounts_arr, sdispls_arr, "sendcounts and sdispls"
-        )
-        recvcounts_arr, rdispls_arr, recvcounts_row, rdispls_row = _parse_counts_displs(
-            recvcounts_arr, rdispls_arr, "recvcounts and rdispls"
-        )
-
-        if (sendcounts_arr < 0).any() or (sdispls_arr < 0).any():
-            raise NcclInvalid("sendcounts and sdispls must be non-negative")
-        if (recvcounts_arr < 0).any() or (rdispls_arr < 0).any():
-            raise NcclInvalid("recvcounts and rdispls must be non-negative")
-
-        send_total = int(sendcounts_row.sum())
-        recv_total = int(recvcounts_row.sum())
-        if s.count < send_total:
-            raise NcclInvalid(
-                f"Buffer count mismatch: sendbuf must have at least {send_total} elements, got {s.count}"
-            )
-        if r.count < recv_total:
-            raise NcclInvalid(
-                f"Buffer count mismatch: recvbuf must have at least {recv_total} elements, got {r.count}"
-            )
-
-        if (sdispls_row + sendcounts_row).max() > s.count:
-            raise NcclInvalid("sendcounts/sdispls exceed sendbuf bounds")
-        if (rdispls_row + recvcounts_row).max() > r.count:
-            raise NcclInvalid("recvcounts/rdispls exceed recvbuf bounds")
-
-        s_counts = _np.ascontiguousarray(sendcounts_arr, dtype=_np.uintp)
-        s_displs = _np.ascontiguousarray(sdispls_arr, dtype=_np.uintp)
-        r_counts = _np.ascontiguousarray(recvcounts_arr, dtype=_np.uintp)
-        r_displs = _np.ascontiguousarray(rdispls_arr, dtype=_np.uintp)
-
-        relay_ptr = 0 if relay is None else relay.ptr
-        relay_count = relay.count if relay is not None else 0
         _nccl_bindings.allto_allv(
-            s.ptr,
-            s_counts.ctypes.data,
-            s_displs.ctypes.data,
-            r.ptr,
-            r_counts.ctypes.data,
-            r_displs.ctypes.data,
+            sendbuf_ptr,
+            sendcounts.ctypes.data,
+            sdispls.ctypes.data,
+            recvbuf_ptr,
+            recvcounts.ctypes.data,
+            rdispls.ctypes.data,
             relay_ptr,
             relay_count,
-            int(s.dtype),
+            int(dtype),
             int(self._comm),
             get_stream_ptr(stream),
         )

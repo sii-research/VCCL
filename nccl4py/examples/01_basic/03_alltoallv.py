@@ -36,7 +36,14 @@ except ImportError:
     sys.exit(1)
 
 try:
+    import numpy as np
+except ImportError:
+    print("ERROR: numpy required. Install with: pip install numpy")
+    sys.exit(1)
+
+try:
     import nccl.core as nccl
+    from nccl.core.interop.torch import _to_nccl_dtype
 except ImportError:
     print("ERROR: nccl.core required.")
     sys.exit(1)
@@ -125,8 +132,32 @@ def main():
         print("rdispls:", _fmt_rows(rdispls, nranks))
     print(f"Rank {rank}: sendbuf:", sendbuf.cpu().tolist())
 
+    # Only this rank's row of the global counts/displs matrices is needed.
+    my_sendcounts = np.ascontiguousarray(
+        sendcounts[rank * nranks : (rank + 1) * nranks], dtype=np.uintp
+    )
+    my_sdispls = np.ascontiguousarray(
+        sdispls[rank * nranks : (rank + 1) * nranks], dtype=np.uintp
+    )
+    my_recvcounts = np.ascontiguousarray(
+        recvcounts[rank * nranks : (rank + 1) * nranks], dtype=np.uintp
+    )
+    my_rdispls = np.ascontiguousarray(
+        rdispls[rank * nranks : (rank + 1) * nranks], dtype=np.uintp
+    )
+    nccl_dtype = _to_nccl_dtype(sendbuf.dtype)
 
-    nccl_comm.alltoallv(sendbuf, recvbuf, sendcounts, sdispls, recvcounts, rdispls, relaybuf)
+    nccl_comm.alltoallv(
+        sendbuf.data_ptr(),
+        recvbuf.data_ptr(),
+        my_sendcounts,
+        my_sdispls,
+        my_recvcounts,
+        my_rdispls,
+        nccl_dtype,
+        relay_ptr=relaybuf.data_ptr(),
+        relay_count=relaybuf.numel(),
+    )
     torch.cuda.synchronize()
 
     recv_host = recvbuf.cpu()
