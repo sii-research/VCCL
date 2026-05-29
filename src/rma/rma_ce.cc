@@ -46,6 +46,9 @@ ncclResult_t ncclRmaCeInit(struct ncclComm* comm){
     // Allocate per-rank operation sequence counters
     NCCLCHECKGOTO(ncclCalloc(&ceCtx->signalOpSeqs, comm->nRanks), ret, fail);
 
+    // Allocate device scratch slot for the signal write value (avoids pageable H2D copy)
+    NCCLCHECKGOTO(ncclCudaCalloc(&ceCtx->signalOpSeqsDev, 1), ret, fail);
+
   }
 
   INFO(NCCL_INIT, "Rank %d: finished init RMA CE contexts, numRmaCeCtxs %d", comm->rank, comm->config.numRmaCtx);
@@ -89,6 +92,9 @@ ncclResult_t ncclRmaCeFinalize(struct ncclComm* comm){
 
     // Free per-rank operation sequence counters
     if (ceCtx->signalOpSeqs) free(ceCtx->signalOpSeqs);
+
+    // Free device scratch slot for the signal write value
+    if (ceCtx->signalOpSeqsDev) NCCLCHECKGOTO(ncclCudaFree(ceCtx->signalOpSeqsDev), ret, fail);
 
     // Free host signals buffer
     if (ceCtx->signalsHost) free(ceCtx->signalsHost);
@@ -168,8 +174,18 @@ ncclResult_t ncclRmaPutCe(struct ncclComm* comm, struct ncclKernelPlan* plan, cu
       // Increment our sequence number for operations to this peer
       ceCtx->signalOpSeqs[task->peer]++;
 
-      // Write the absolute sequence number - peer will wait for this value
-      CUDACHECKGOTO(cudaMemcpyAsync(peerSignal, &ceCtx->signalOpSeqs[task->peer], sizeof(uint64_t), cudaMemcpyHostToDevice, stream), ret, fail);
+      // Write the absolute sequence number - peer will wait for this value.
+      // Inject the value into a device scratch slot via an in-stream memory op,
+      // then copy device->device into the peer's signal slot. This avoids the
+      // pageable host->device cudaMemcpyAsync, which is implicitly synchronous
+      // and serializes the launch thread against the GPU on every signaled put.
+      CUstreamBatchMemOpParams writeOp = {};
+      writeOp.writeValue.operation = CU_STREAM_MEM_OP_WRITE_VALUE_64;
+      writeOp.writeValue.address = (CUdeviceptr)ceCtx->signalOpSeqsDev;
+      writeOp.writeValue.value64 = ceCtx->signalOpSeqs[task->peer];
+      writeOp.writeValue.flags = CU_STREAM_WRITE_VALUE_DEFAULT;
+      NCCLCHECKGOTO(ncclCuStreamBatchMemOp(stream, 1, &writeOp), ret, fail);
+      CUDACHECKGOTO(cudaMemcpyAsync(peerSignal, ceCtx->signalOpSeqsDev, sizeof(uint64_t), cudaMemcpyDeviceToDevice, stream), ret, fail);
     }
 
     // Free the task after processing
