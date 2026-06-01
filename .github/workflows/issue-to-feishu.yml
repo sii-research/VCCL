@@ -1,0 +1,91 @@
+name: Notify Feishu on Issues
+
+on:
+  issues:
+    types: [opened, reopened, edited, labeled, closed, assigned]
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "手动测试标题"
+        required: false
+      url:
+        description: "手动测试链接"
+        required: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Feishu payload (handles all actions & manual run)
+        env:
+          # 这些表达式仅在手动触发时用作兜底值
+          FALLBACK_TITLE: ${{ inputs.title || 'Manual Test Issue' }}
+          FALLBACK_URL:   ${{ inputs.url || format('{0}/{1}', github.server_url, github.repository) }}
+          ACTOR:          ${{ github.actor }}
+        run: |
+          # 从事件 JSON 中提取字段（issues 事件有 .issue；手动触发时可能没有）
+          ACTION=$(jq -r '.action // "workflow_dispatch"' "$GITHUB_EVENT_PATH")
+          TITLE=$(jq -r '.issue.title // empty' "$GITHUB_EVENT_PATH")
+          URL=$(jq -r '.issue.html_url // empty' "$GITHUB_EVENT_PATH")
+          NUMBER=$(jq -r '.issue.number // empty' "$GITHUB_EVENT_PATH")
+          AUTHOR=$(jq -r '.issue.user.login // empty' "$GITHUB_EVENT_PATH")
+          STATE=$(jq -r '.issue.state // empty' "$GITHUB_EVENT_PATH")
+          LABELS=$(jq -r '[.issue.labels[]?.name] | join(", ")' "$GITHUB_EVENT_PATH")
+          ASSIGNEE=$(jq -r '.assignee.login // empty' "$GITHUB_EVENT_PATH")   # issues: assigned 时有
+          SINGLE_LABEL=$(jq -r '.label.name // empty' "$GITHUB_EVENT_PATH")    # issues: labeled 时有
+
+          # 兜底（手动触发或字段缺失时）
+          TITLE=${TITLE:-"$FALLBACK_TITLE"}
+          URL=${URL:-"$FALLBACK_URL"}
+          NUMBER=${NUMBER:-"N/A"}
+          AUTHOR=${AUTHOR:-"$ACTOR"}
+          STATE=${STATE:-"open"}
+
+          # 基础卡片
+          cat > payload.json <<EOF
+          {
+            "msg_type": "interactive",
+            "card": {
+              "config": { "wide_screen_mode": true },
+              "header": {
+                "title": { "tag": "plain_text", "content": "🐙 GitHub Issue ${ACTION}: #${NUMBER}" }
+              },
+              "elements": [
+                { "tag": "div", "text": { "tag": "lark_md", "content": "**${TITLE}**" } },
+                { "tag": "div", "text": { "tag": "lark_md", "content": "作者：${AUTHOR}  状态：${STATE}" } },
+                { "tag": "div", "text": { "tag": "lark_md", "content": "👉 [在 GitHub 打开](${URL})" } }
+              ]
+            }
+          }
+          EOF
+
+          # 如有“全部标签”，追加一行
+          if [ -n "$LABELS" ]; then
+            jq --arg labels "$LABELS" \
+               '.card.elements += [{"tag":"div","text":{"tag":"lark_md","content":("标签：" + $labels)}}]' \
+               payload.json > tmp && mv tmp payload.json
+          fi
+
+          # 如果是 labeled 动作，追加“新增标签：X”
+          if [ "$ACTION" = "labeled" ] && [ -n "$SINGLE_LABEL" ]; then
+            jq --arg lab "$SINGLE_LABEL" \
+               '.card.elements += [{"tag":"div","text":{"tag":"lark_md","content":("新增标签：" + $lab)}}]' \
+               payload.json > tmp && mv tmp payload.json
+          fi
+
+          # 如果是 assigned 动作，追加“指派给：@user”
+          if [ "$ACTION" = "assigned" ] && [ -n "$ASSIGNEE" ]; then
+            jq --arg a "$ASSIGNEE" \
+               '.card.elements += [{"tag":"div","text":{"tag":"lark_md","content":("指派给：" + $a)}}]' \
+               payload.json > tmp && mv tmp payload.json
+          fi
+
+          echo "=== Payload to Feishu ==="
+          cat payload.json
+
+      - name: Send to Feishu
+        env:
+          WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: |
+          curl -s -w "\nhttp_code=%{http_code}\n" -X POST -H 'Content-Type: application/json' \
+            -d @payload.json "$WEBHOOK" | tee response.log
