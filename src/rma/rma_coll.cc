@@ -490,7 +490,7 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
     struct ncclRmaWorkBatch* barrierBatch = nullptr;
     NCCLCHECK(allocRmaWorkBatch(comm, &barrierBatch));
     barrierBatch->logId = task->logId;
-    NCCLCHECK(scheduleBarrierTasks(comm, task, plan, barrierBatch));
+    //NCCLCHECK(scheduleBarrierTasks(comm, task, plan, barrierBatch));
 
     int batchIdx = 0;
     struct ncclRmaWorkBatch* curBatch = sched.batchesHead;
