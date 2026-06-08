@@ -1,11 +1,11 @@
-From 33b78648a210ebb47f8f626057de88ea3c8bf194 Mon Sep 17 00:00:00 2001
-From: root <liuhe@infrawaves.com>
-Date: Sun, 31 May 2026 12:13:24 +0000
-Subject: [PATCH] megatron_vccl_v2_patch
+From 427d2824d85ed6323e1300625a12e61dfe33802e Mon Sep 17 00:00:00 2001
+From: cq-eng <2225865443@qq.com>
+Date: Mon, 8 Jun 2026 11:27:41 +0800
+Subject: [PATCH] update vccl v2 patch
 
 ---
  .../core/extensions/transformer_engine.py     |    4 +-
- megatron/core/fusions/fused_moe_permute.py    |  822 +++++++
+ megatron/core/fusions/fused_moe_permute.py    |  822 ++++++
  .../common/model_chunk_schedule_plan.py       |    9 +-
  .../core/models/gpt/fine_grained_callables.py |    6 +-
  .../pipeline_parallel/p2p_communication.py    |  119 +-
@@ -17,16 +17,16 @@ Subject: [PATCH] megatron_vccl_v2_patch
  .../core/transformer/transformer_config.py    |    1 +
  megatron/training/arguments.py                |    9 +-
  megatron/training/training.py                 |    3 +
- te/grouped_linear.py                          |  920 ++++++++
- te/grouped_linear_orig.py                     |  896 ++++++++
- vccl/vccl_utils.py                            | 1971 +++++++++++++++++
+ te/grouped_linear.py                          |  920 +++++++
+ te/grouped_linear_orig.py                     |  896 +++++++
+ vccl/vccl_utils.py                            | 2256 +++++++++++++++++
  vccl_alloc/README.md                          |  199 ++
  vccl_alloc/__init__.py                        |  100 +
- vccl_alloc/bench_in_pool.py                   |  260 +++
- vccl_alloc/demo.py                            |  394 ++++
- vccl_alloc/setup.py                           |  915 ++++++++
+ vccl_alloc/bench_in_pool.py                   |  260 ++
+ vccl_alloc/demo.py                            |  394 +++
+ vccl_alloc/setup.py                           |  915 +++++++
  vccl_alloc/vccl_arena_allocator.cu            |  311 +++
- 22 files changed, 7111 insertions(+), 95 deletions(-)
+ 22 files changed, 7396 insertions(+), 95 deletions(-)
  create mode 100644 megatron/core/fusions/fused_moe_permute.py
  create mode 100644 te/grouped_linear.py
  create mode 100644 te/grouped_linear_orig.py
@@ -3446,10 +3446,10 @@ index 000000000..5749d96c9
 +        return weight_quantizers
 diff --git a/vccl/vccl_utils.py b/vccl/vccl_utils.py
 new file mode 100644
-index 000000000..cd903c068
+index 000000000..460a81e50
 --- /dev/null
 +++ b/vccl/vccl_utils.py
-@@ -0,0 +1,1971 @@
+@@ -0,0 +1,2256 @@
 +import math
 +from typing import Any, Callable, List, Optional, Sequence, Tuple
 +
@@ -3458,6 +3458,7 @@ index 000000000..cd903c068
 +import nccl.core as nccl
 +from nccl.core.interop.torch import _to_nccl_dtype
 +import torch
++import torch.distributed as dist
 +import vccl_alloc
 +
 +from megatron.core import utils
@@ -3468,6 +3469,7 @@ index 000000000..cd903c068
 +    gather_from_sequence_parallel_region,
 +    reduce_scatter_to_sequence_parallel_region,
 +)
++from megatron.core.utils import get_tensor_model_parallel_group_if_none
 +from megatron.core.transformer.moe.moe_utils import (
 +    ProcessGroupCollection,
 +    get_align_size_for_quantization,
@@ -4255,7 +4257,8 @@ index 000000000..cd903c068
 +        # TODO: buffer size may need to be aligned to 128B ?
 +        self._element_size = params_dtype.itemsize
 +        self._prob_element_size = prob_dtype.itemsize
-+        unit_count = bs * seq_len * topk
++        # When expert_tensor_parallel_size > 1, each TP rank handles a portion of tokens
++        unit_count = bs * seq_len * topk // self._tp_size
 +        token_unit = unit_count * hidden_size * self._element_size
 +        prob_unit = unit_count * self._prob_element_size
 +        # To prevent overflow, actual buffer sizes are reserved at 2x the minimum unit
@@ -4920,6 +4923,190 @@ index 000000000..cd903c068
 +        return output_
 +
 +
++# ============================================================================
++# VCCL-specific reduce-scatter that hijacks output into input_token_fwd_tensor
++# ============================================================================
++
++def _vccl_reduce_scatter_along_first_dim(
++    input_, group, fwd_out_buffer=None, input_split_sizes=None
++):
++    """Reduce-scatter with optional output hijack into fwd_out_buffer.
++
++    This is a copy of megatron.core.tensor_parallel.mappings._reduce_scatter_along_first_dim
++    with the addition of writing the result into fwd_out_buffer when provided.
++
++    Note: This function assumes world_size > 1. The caller (vccl_reduce_scatter_to_sequence_parallel_region)
++    is only invoked when tp_size > 1.
++
++    Args:
++        input_ (torch.Tensor): The input tensor to be reduce-scattered.
++        group: The process group for reduce-scatter.
++        fwd_out_buffer (torch.Tensor, optional): If provided, the output is written here.
++        input_split_sizes (List[int], optional): A list specifying the sizes of
++            the input splits along the first dimension for each rank.
++    """
++    assert group is not None, "group should not be None"
++    world_size = group.size()
++    assert world_size > 1, "This function requires world_size > 1"
++
++    if input_split_sizes is None:
++        dim_size = list(input_.size())
++        assert (
++            dim_size[0] % world_size == 0
++        ), "First dimension of the tensor should be divisible by tensor parallel size"
++
++        dim_size[0] = dim_size[0] // world_size
++
++        if fwd_out_buffer is not None:
++            output = fwd_out_buffer.view(input_.dtype)[:dim_size[0] * dim_size[1]].view(dim_size)
++        else:
++            output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
++        dist.reduce_scatter(output, input_.contiguous(), group=group)
++    else:
++        rank = group.rank()
++        input_tensor_list = list(torch.split(input_, input_split_sizes, dim=0))
++
++        if fwd_out_buffer is not None:
++            output = fwd_out_buffer.view(input_.dtype)[:input_tensor_list[rank].numel()].view(
++                input_tensor_list[rank].shape
++            )
++        else:
++            output = torch.empty_like(input_tensor_list[rank])
++        dist.reduce_scatter(output, input_tensor_list, group=group)
++    return output
++
++
++class _VcclReduceScatterToSequenceParallelRegion(torch.autograd.Function):
++    """Reduce scatter with VCCL output hijack for combine AlltoAll sendbuf."""
++
++    @staticmethod
++    def forward(ctx, input_, group, fwd_out_buffer, input_split_sizes=None):
++        """Forward function. Hijacks output into fwd_out_buffer."""
++        ctx.group = group
++        ctx.input_split_sizes = input_split_sizes
++        ctx.input_shape = input_.shape
++        return _vccl_reduce_scatter_along_first_dim(
++            input_, group, fwd_out_buffer=fwd_out_buffer, input_split_sizes=input_split_sizes
++        )
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        """Backward function."""
++        from megatron.core.tensor_parallel.mappings import _gather_along_first_dim
++        input_split_sizes = ctx.input_split_sizes
++        return (
++            _gather_along_first_dim(grad_output, ctx.group, input_split_sizes),
++            None,
++            None,
++            None,
++        )
++
++
++def vccl_reduce_scatter_to_sequence_parallel_region(
++    input_, group=None, fwd_out_buffer=None, input_split_sizes=None
++):
++    """VCCL version of reduce_scatter_to_sequence_parallel_region.
++
++    This function hijacks the output into fwd_out_buffer (input_token_fwd_tensor)
++    so that the combine AlltoAll can read from it directly.
++
++    Args:
++        input_ (torch.Tensor): Input tensor.
++        group: Process group for reduce-scatter.
++        fwd_out_buffer (torch.Tensor): Buffer to write the output into.
++        input_split_sizes (List[int], optional): Split sizes for uneven distribution.
++    """
++    group = get_tensor_model_parallel_group_if_none(group)
++    return _VcclReduceScatterToSequenceParallelRegion.apply(
++        input_, group, fwd_out_buffer, input_split_sizes
++    )
++
++
++def _vccl_gather_along_first_dim(
++    input_, group, bwd_out_buffer=None, output_split_sizes=None
++):
++    """Gather with optional backward hijack into bwd_out_buffer.
++
++    This is a copy of megatron.core.tensor_parallel.mappings._gather_along_first_dim
++    with the addition of hijacking the backward's reduce-scatter output into bwd_out_buffer.
++
++    Note: This function assumes world_size > 1.
++
++    Args:
++        input_ (torch.Tensor): The input tensor to be gathered.
++        group: The process group for all-gather.
++        bwd_out_buffer (torch.Tensor, optional): If provided, backward's reduce-scatter
++            output is written here.
++        output_split_sizes (List[int], optional): Split sizes for uneven distribution.
++    """
++    assert group is not None, "group should not be None"
++    world_size = group.size()
++    assert world_size > 1, "This function requires world_size > 1"
++
++    dim_size = list(input_.size())
++    if output_split_sizes is None:
++        dim_size[0] = dim_size[0] * world_size
++
++        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
++        torch.distributed.all_gather_into_tensor(output, input_.contiguous(), group=group)
++    else:
++        dim_size[0] = sum(output_split_sizes)
++        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
++        output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
++        torch.distributed.all_gather(output_tensor_list, input_.contiguous(), group=group)
++
++    return output
++
++
++class _VcclGatherFromSequenceParallelRegion(torch.autograd.Function):
++    """Gather with VCCL backward hijack for dispatch AlltoAll sendbuf_bwd."""
++
++    @staticmethod
++    def forward(ctx, input_, group, bwd_out_buffer, output_split_sizes=None):
++        """Forward function. All-gather along first dim."""
++        ctx.group = group
++        ctx.output_split_sizes = output_split_sizes
++        ctx.bwd_out_buffer = bwd_out_buffer
++        ctx.input_shape = input_.shape
++        return _vccl_gather_along_first_dim(
++            input_, group, bwd_out_buffer=bwd_out_buffer, output_split_sizes=output_split_sizes
++        )
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        """Backward function. Reduce-scatter with hijack into bwd_out_buffer."""
++        return (
++            _vccl_reduce_scatter_along_first_dim(
++                grad_output, ctx.group,
++                fwd_out_buffer=ctx.bwd_out_buffer,
++                input_split_sizes=ctx.output_split_sizes
++            ),
++            None,
++            None,
++            None,
++        )
++
++
++def vccl_gather_from_sequence_parallel_region(
++    input_, group=None, bwd_out_buffer=None, output_split_sizes=None
++):
++    """VCCL version of gather_from_sequence_parallel_region.
++
++    This function hijacks the backward's reduce-scatter output into bwd_out_buffer
++    (input_token_bwd_tensor) so that dispatch's AlltoAll backward can read from it directly.
++
++    Args:
++        input_ (torch.Tensor): Input tensor.
++        group: Process group for all-gather.
++        bwd_out_buffer (torch.Tensor): Buffer to write the backward output into.
++        output_split_sizes (List[int], optional): Split sizes for uneven distribution.
++    """
++    group = get_tensor_model_parallel_group_if_none(group)
++    return _VcclGatherFromSequenceParallelRegion.apply(
++        input_, group, bwd_out_buffer, output_split_sizes
++    )
++
++
 +class VcclMoEAlltoAllvTokenDispatcher(MoEAlltoAllTokenDispatcher):
 +    """
 +    AlltoAllv-based token dispatcher of VCCL.
@@ -5216,6 +5403,11 @@ index 000000000..cd903c068
 +        This involves an All-Gather in the tensor parallel dimension and sorting
 +        tokens by expert if there are multiple local experts.
 +
++        Grad hijack strategy:
++        - When tp_size > 1: hijack in gather's backward (reduce_scatter) for both token and prob
++        - When tp_size == 1 and num_local_experts > 1: hijack in sort's backward
++        - When tp_size == 1 and num_local_experts == 1: no hijack needed
++
 +        Args:
 +            global_input_tokens (torch.Tensor): Tokens after All-to-All.
 +            global_probs (torch.Tensor): Probabilities after All-to-All.
@@ -5231,11 +5423,40 @@ index 000000000..cd903c068
 +                output_split_sizes = None
 +            else:
 +                output_split_sizes = self.output_splits_tp.tolist()
-+            global_input_tokens = gather_from_sequence_parallel_region(
-+                global_input_tokens, group=self.tp_group, output_split_sizes=output_split_sizes
++
++            # Compute bwd_out_buffer size for token grad hijack
++            # In backward (reduce-scatter), the output size is the input size / tp_size
++            # For uneven split, it's output_split_sizes[rank]
++            N_gather = global_input_tokens.shape[0]
++            H_gather = global_input_tokens.shape[1]
++            if output_split_sizes is not None:
++                # Uneven split: each rank gets output_split_sizes[rank] tokens
++                rank = self.tp_group.rank()
++                rs_out_N = output_split_sizes[rank]
++            else:
++                # Even split: each rank gets N_gather / tp_size tokens
++                rs_out_N = N_gather // self.tp_size
++
++            # Token grad hijack buffer - size should be reduce-scatter output size
++            token_bwd_out_buffer = self._manager.input_token_bwd_tensor.view(
++                global_input_tokens.dtype
++            )[:rs_out_N * H_gather].view(rs_out_N, H_gather)
++
++            # Prob grad hijack buffer - same size as token (without hidden dim)
++            prob_bwd_out_buffer = self._manager.input_prob_bwd_tensor.view(
++                global_probs.dtype
++            )[:rs_out_N]
++
++            # Use vccl_gather_from_sequence_parallel_region to hijack backward
++            global_input_tokens = vccl_gather_from_sequence_parallel_region(
++                global_input_tokens, group=self.tp_group,
++                bwd_out_buffer=token_bwd_out_buffer,
++                output_split_sizes=output_split_sizes,
 +            )
-+            global_probs = gather_from_sequence_parallel_region(
-+                global_probs, group=self.tp_group, output_split_sizes=output_split_sizes
++            global_probs = vccl_gather_from_sequence_parallel_region(
++                global_probs, group=self.tp_group,
++                bwd_out_buffer=prob_bwd_out_buffer,
++                output_split_sizes=output_split_sizes,
 +            )
 +
 +        # Permutation 2: Sort tokens by local expert.
@@ -5243,57 +5464,80 @@ index 000000000..cd903c068
 +            "before_permutation_2", self.tokens_per_expert
 +        )
 +        if self.num_local_experts > 1:
-+            if self.drop_and_pad:
-+                N, H = global_input_tokens.shape
-+                combine_input_tensor_len = N * H
-+                A = self.tp_size * self.ep_size
-+                B = self.num_local_experts
-+                C = self.capacity
++            if self.tp_size > 1:
++                # When tp_size > 1, don't hijack in sort step.
++                # The grad hijack already happened in gather's backward above.
++                if self.drop_and_pad:
++                    N, H = global_input_tokens.shape
++                    A = self.tp_size * self.ep_size
++                    B = self.num_local_experts
++                    C = self.capacity
 +
-+                sort_grad_out_buffer = self._manager.input_token_bwd_tensor.view(
-+                    global_input_tokens.dtype
-+                )[:combine_input_tensor_len].view(N, H)
++                    global_input_tokens = DiffTransposeChunksOut.apply(
++                        global_input_tokens, A, B, C, None, None,
++                    )
 +
-+                # Forward: [A,B,C,H] -> transpose(0,1) -> [B,A,C,H] -> flatten
-+                # (identical to original view/transpose/contiguous/flatten)
-+                global_input_tokens = DiffTransposeChunksOut.apply(
-+                    global_input_tokens, A, B, C, sort_grad_out_buffer, None,
-+                )
-+
-+                if global_probs is not None:
-+                    sort_prob_grad_out_buffer = self._manager.input_prob_bwd_tensor.view(
-+                        global_probs.dtype
-+                    )[:N]
-+                    global_probs = DiffTransposeChunksOut.apply(
-+                        global_probs, A, B, C, sort_prob_grad_out_buffer, None,
++                    if global_probs is not None:
++                        global_probs = DiffTransposeChunksOut.apply(
++                            global_probs, A, B, C, None, None,
++                        )
++                else:
++                    global_input_tokens, global_probs = vccl_sort_chunks_by_idxs(
++                        global_input_tokens,
++                        self.num_global_tokens_per_local_expert.ravel(),
++                        self.sort_input_by_local_experts,
++                        probs=global_probs,
++                        grad_out_buffer=None,
++                        prob_grad_out_buffer=None,
++                        fused=self.config.moe_permute_fusion,
 +                    )
 +            else:
-+                N, H = global_input_tokens.shape
-+                combine_input_tensor_len = N * H
++                # When tp_size == 1, hijack in sort step.
++                if self.drop_and_pad:
++                    N, H = global_input_tokens.shape
++                    combine_input_tensor_len = N * H
++                    A = self.tp_size * self.ep_size
++                    B = self.num_local_experts
++                    C = self.capacity
 +
-+                # Pre-allocate grad_out_buffer from input_token_bwd_tensor:
-+                # sort backward will write the unsorted gradient here, which is
-+                # exactly where dispatch's VcclAlltoAllv.backward expects sendbuf_bwd,
-+                # avoiding the extra copy.
-+                sort_grad_out_buffer = self._manager.input_token_bwd_tensor.view(
-+                    global_input_tokens.dtype
-+                )[:combine_input_tensor_len].view(N, H)
++                    sort_grad_out_buffer = self._manager.input_token_bwd_tensor.view(
++                        global_input_tokens.dtype
++                    )[:combine_input_tensor_len].view(N, H)
 +
-+                sort_prob_grad_out_buffer = None
-+                if global_probs is not None:
-+                    sort_prob_grad_out_buffer = self._manager.input_prob_bwd_tensor.view(
-+                        global_probs.dtype
-+                    )[:N]
++                    global_input_tokens = DiffTransposeChunksOut.apply(
++                        global_input_tokens, A, B, C, sort_grad_out_buffer, None,
++                    )
 +
-+                global_input_tokens, global_probs = vccl_sort_chunks_by_idxs(
-+                    global_input_tokens,
-+                    self.num_global_tokens_per_local_expert.ravel(),
-+                    self.sort_input_by_local_experts,
-+                    probs=global_probs,
-+                    grad_out_buffer=sort_grad_out_buffer,
-+                    prob_grad_out_buffer=sort_prob_grad_out_buffer,
-+                    fused=self.config.moe_permute_fusion,
-+                )
++                    if global_probs is not None:
++                        sort_prob_grad_out_buffer = self._manager.input_prob_bwd_tensor.view(
++                            global_probs.dtype
++                        )[:N]
++                        global_probs = DiffTransposeChunksOut.apply(
++                            global_probs, A, B, C, sort_prob_grad_out_buffer, None,
++                        )
++                else:
++                    N, H = global_input_tokens.shape
++                    combine_input_tensor_len = N * H
++
++                    sort_grad_out_buffer = self._manager.input_token_bwd_tensor.view(
++                        global_input_tokens.dtype
++                    )[:combine_input_tensor_len].view(N, H)
++
++                    sort_prob_grad_out_buffer = None
++                    if global_probs is not None:
++                        sort_prob_grad_out_buffer = self._manager.input_prob_bwd_tensor.view(
++                            global_probs.dtype
++                        )[:N]
++
++                    global_input_tokens, global_probs = vccl_sort_chunks_by_idxs(
++                        global_input_tokens,
++                        self.num_global_tokens_per_local_expert.ravel(),
++                        self.sort_input_by_local_experts,
++                        probs=global_probs,
++                        grad_out_buffer=sort_grad_out_buffer,
++                        prob_grad_out_buffer=sort_prob_grad_out_buffer,
++                        fused=self.config.moe_permute_fusion,
++                    )
 +
 +        tokens_per_expert = self._maybe_dtoh_and_synchronize(
 +            "before_finish", self.tokens_per_expert
@@ -5302,18 +5546,19 @@ index 000000000..cd903c068
 +        N, H = global_input_tokens.shape
 +        combine_input_tensor_len = N * H
 +
-+        if self.num_local_experts > 1:
-+            # When sort/transpose is applied, return None for both so that:
-+            # - fc2 allocates its own output (combine_preprocess will unsort into
-+            #   input_token_fwd_tensor)
++        if self.num_local_experts > 1 or self.tp_size > 1:
++            # When sort/transpose is applied (num_local_experts > 1) or
++            # reduce_scatter is needed (tp_size > 1), return None for both so that:
++            # - fc2 allocates its own output (combine_preprocess will unsort and/or
++            #   reduce_scatter into input_token_fwd_tensor)
 +            # - fc1 allocates its own grad (sort backward writes the unsorted grad
 +            #   into input_token_bwd_tensor via grad_out_buffer)
 +            combine_input_tensor = None
 +            dispatch_dgard_tensor = None
 +        else:
-+            # No sort step: fc2 writes directly into input_token_fwd_tensor (combine
-+            # sendbuf), fc1 backward writes directly into input_token_bwd_tensor
-+            # (dispatch sendbuf_bwd).
++            # No sort step and no reduce_scatter: fc2 writes directly into
++            # input_token_fwd_tensor (combine sendbuf), fc1 backward writes
++            # directly into input_token_bwd_tensor (dispatch sendbuf_bwd).
 +            combine_input_tensor = self._manager.input_token_fwd_tensor.view(
 +                global_input_tokens.dtype
 +            )[:combine_input_tensor_len].view(N, H)
@@ -5330,42 +5575,82 @@ index 000000000..cd903c068
 +        For num_local_experts > 1, reverses the sort done in dispatch_postprocess.
 +        The forward writes into input_token_fwd_tensor via fwd_out_buffer so that
 +        token_combine's AlltoAll can read from it directly without an extra copy.
++
++        When tp_size > 1 and num_local_experts > 1, we defer the hijack to the
++        reduce_scatter step (instead of the sort step) so that the final output
++        after reduce_scatter is written directly into input_token_fwd_tensor.
 +        """
 +        if self.num_local_experts > 1:
 +            N, H = hidden_states.shape
 +            combine_input_tensor_len = N * H
 +
-+            # fwd_out_buffer: combine AlltoAll expects input here
-+            fwd_out_buffer = self._manager.input_token_fwd_tensor.view(
-+                hidden_states.dtype
-+            )[:combine_input_tensor_len].view(N, H)
-+
-+            if self.drop_and_pad:
-+                # Inverse of dispatch's [A,B,C]->[B,A,C] is [B,A,C]->[A,B,C]:
-+                # same transpose but with B,A swapped (pass B as first dim, A as second)
-+                A = self.tp_size * self.ep_size
-+                B = self.num_local_experts
-+                C = self.capacity
-+                hidden_states = DiffTransposeChunksOut.apply(
-+                    hidden_states, B, A, C, None, fwd_out_buffer,
-+                )
++            if self.tp_size > 1:
++                # When tp_size > 1, don't hijack in sort step.
++                # The hijack will happen in reduce_scatter below.
++                if self.drop_and_pad:
++                    A = self.tp_size * self.ep_size
++                    B = self.num_local_experts
++                    C = self.capacity
++                    hidden_states = DiffTransposeChunksOut.apply(
++                        hidden_states, B, A, C, None, None,
++                    )
++                else:
++                    hidden_states, _ = vccl_sort_chunks_by_idxs(
++                        hidden_states,
++                        self.num_global_tokens_per_local_expert.T.ravel(),
++                        self.restore_output_by_local_experts,
++                        fwd_out_buffer=None,
++                        fused=self.config.moe_permute_fusion,
++                    )
 +            else:
-+                hidden_states, _ = vccl_sort_chunks_by_idxs(
-+                    hidden_states,
-+                    self.num_global_tokens_per_local_expert.T.ravel(),
-+                    self.restore_output_by_local_experts,
-+                    fwd_out_buffer=fwd_out_buffer,
-+                    fused=self.config.moe_permute_fusion,
-+                )
++                # When tp_size == 1, hijack in sort step as before.
++                fwd_out_buffer = self._manager.input_token_fwd_tensor.view(
++                    hidden_states.dtype
++                )[:combine_input_tensor_len].view(N, H)
++
++                if self.drop_and_pad:
++                    A = self.tp_size * self.ep_size
++                    B = self.num_local_experts
++                    C = self.capacity
++                    hidden_states = DiffTransposeChunksOut.apply(
++                        hidden_states, B, A, C, None, fwd_out_buffer,
++                    )
++                else:
++                    hidden_states, _ = vccl_sort_chunks_by_idxs(
++                        hidden_states,
++                        self.num_global_tokens_per_local_expert.T.ravel(),
++                        self.restore_output_by_local_experts,
++                        fwd_out_buffer=fwd_out_buffer,
++                        fused=self.config.moe_permute_fusion,
++                    )
 +
 +        if self.tp_size > 1:
 +            if self.output_splits_tp is None:
 +                input_split_sizes = None
 +            else:
 +                input_split_sizes = self.output_splits_tp.tolist()
-+            hidden_states = reduce_scatter_to_sequence_parallel_region(
++
++            # Prepare fwd_out_buffer for reduce_scatter hijack.
++            # After reduce_scatter, the output size is reduced by tp_size.
++            N_rs, H_rs = hidden_states.shape
++            if input_split_sizes is not None:
++                # Uneven split: output size is input_split_sizes[rank] * H
++                rank = self.tp_group.rank()
++                out_N = input_split_sizes[rank]
++            else:
++                # Even split: output size is N / tp_size
++                out_N = N_rs // self.tp_size
++
++            # Use probs.dtype to match the dtype of input_ passed to reduce_scatter
++            fwd_out_buffer = self._manager.input_token_fwd_tensor.view(
++                self.probs.dtype
++            )[:out_N * H_rs].view(out_N, H_rs)
++
++            # Use vccl_reduce_scatter_to_sequence_parallel_region to hijack output
++            hidden_states = vccl_reduce_scatter_to_sequence_parallel_region(
 +                hidden_states.to(self.probs.dtype),
 +                group=self.tp_group,
++                fwd_out_buffer=fwd_out_buffer,
 +                input_split_sizes=input_split_sizes,
 +            ).to(hidden_states.dtype)
 +
@@ -7637,5 +7922,5 @@ index 000000000..f27e52a6f
 +
 +}  // extern "C"
 -- 
-2.43.0
+2.39.5 (Apple Git-154)
 
