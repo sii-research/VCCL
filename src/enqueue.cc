@@ -195,13 +195,13 @@ void ncclAddWorkBatchToPlan(
   }
 }
 
-static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
+static ncclResult_t finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   plan->syncCondition = NULL;
   ncclKernelPlanner::WipPlan::Channel* wipChannels = comm->planner.wipPlan.channels;
   size_t workBytes = plan->workBytes;
   size_t batchBytes = plan->nWorkBatches*sizeof(struct ncclDevWorkBatch);
 
-  if (plan->isSymColl) return;
+  if (plan->isSymColl) return ncclSuccess;
   plan->threadPerBlock = std::max(plan->threadPerBlock, NCCL_MIN_NTHREADS);
 
   // If we can fit everything into the kernel args we do so.
@@ -272,11 +272,25 @@ static void finishPlan(struct ncclComm* comm, struct ncclKernelPlan* plan) {
     ncclIntruQueueEnqueue(&plan->proxyOpQueue, op);
     proxyOpCnt += 1;
   }
-  if (ncclParamPassSm() && plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()]) {
+  if (ncclParamPassSm() && plan->kernelFn == ncclDevKernelForFunc[ncclDevFuncId_P2p()] && proxyOpCnt > 0) {
+    if (comm->psmReadyFlag == nullptr) {
+      void* dptr;
+      CUDACHECK(cudaHostAlloc((void**)&comm->psmReadyFlag, sizeof(uint32_t), cudaHostAllocMapped));
+      CUDACHECK(cudaHostAlloc((void**)&comm->psmDoneFlag, sizeof(uint32_t), cudaHostAllocMapped));
+      *comm->psmReadyFlag = 0;
+      *comm->psmDoneFlag = 0;
+      CUDACHECK(cudaHostGetDevicePointer(&dptr, comm->psmReadyFlag, 0));
+      comm->psmReadyFlagDev = dptr;
+      CUDACHECK(cudaHostGetDevicePointer(&dptr, comm->psmDoneFlag, 0));
+      comm->psmDoneFlagDev = dptr;
+    }
     plan->syncCondition = new psmSyncCondition;
-    plan->syncCondition->proxyReadyEvent.store(0, std::memory_order_relaxed);
+    plan->syncCondition->readyFlag = comm->psmReadyFlag;
+    plan->syncCondition->doneFlag = comm->psmDoneFlag;
+    plan->syncCondition->seq = ++comm->psmSeqNum;
     plan->syncCondition->proxyOpCount.store(proxyOpCnt, std::memory_order_relaxed);
   }
+  return ncclSuccess;
 }
 
 NCCL_PARAM(GraphRegister, "GRAPH_REGISTER", 1);
@@ -1639,7 +1653,7 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
           }
         }
 
-        finishPlan(comm, plan);
+        NCCLCHECKGOTO(finishPlan(comm, plan), result, failure);
         if (plan->workBytes != 0) {
           ncclIntruQueueEnqueue(&planner->planQueue, plan);
           nPlans += 1;
@@ -1728,16 +1742,6 @@ ncclResult_t ncclLaunchKernelBefore_NoUncapturedCuda(struct ncclComm* comm, stru
 NCCL_PARAM(MemSyncDomain, "MEM_SYNC_DOMAIN", cudaLaunchMemSyncDomainRemote);
 #endif
 
-static void CUDART_CB hostProxySyncCallback(void* args) {
-  NCCL_NVTX3_FUNC_RANGE;
-  struct psmSyncCondition* syncCond = static_cast<struct psmSyncCondition*>(args);
-  syncCond->proxyReadyEvent.store(1, std::memory_order_release);
-  while (syncCond->proxyOpCount.load(std::memory_order_acquire) != 0) {
-    sched_yield();
-  }
-  delete syncCond;
-}
-
 ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan) {
   ncclResult_t ret = ncclSuccess;
   struct ncclKernelPlanner* planner = &comm->planner;
@@ -1763,7 +1767,9 @@ ncclResult_t ncclLaunchKernel(struct ncclComm* comm, struct ncclKernelPlan* plan
       node = node->next;
     }
     if (plan->syncCondition) {
-      CUDACHECKGOTO(cudaLaunchHostFunc(launchStream, hostProxySyncCallback, plan->syncCondition), ret, do_return);
+      uint32_t seq = plan->syncCondition->seq;
+      CUCHECKGOTO(cuStreamWriteValue32(launchStream, (CUdeviceptr)comm->psmReadyFlagDev, seq, 0), ret, do_return);
+      CUCHECKGOTO(cuStreamWaitValue32(launchStream, (CUdeviceptr)comm->psmDoneFlagDev, seq, CU_STREAM_WAIT_VALUE_GEQ), ret, do_return);
     }
     goto do_return;
   }

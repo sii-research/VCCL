@@ -43,7 +43,9 @@ typedef enum : uint8_t {
 enum ncclProxyOpState { ncclProxyOpNone, ncclProxyOpReady, ncclProxyOpProgress };
 
 struct psmSyncCondition {
-  std::atomic<int> proxyReadyEvent;
+  uint32_t* readyFlag;          // launchStream writes seq after the self-copy; proxy gate reads it
+  uint32_t* doneFlag;           // last proxy op writes seq; launchStream's WaitValue(GEQ seq) waits on it
+  uint32_t seq;                 // this launch's sync value
   std::atomic<int> proxyOpCount;
 };
 

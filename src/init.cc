@@ -281,6 +281,10 @@ static ncclResult_t commFree(ncclComm_t comm) {
     }
   }
 
+  // PASS_SM sync flags: proxy threads are joined above, so nothing references them anymore.
+  if (comm->psmReadyFlag) CUDACHECK(cudaFreeHost(comm->psmReadyFlag));
+  if (comm->psmDoneFlag) CUDACHECK(cudaFreeHost(comm->psmDoneFlag));
+
   if (comm->memPool) CUDACHECK(cudaMemPoolDestroy(comm->memPool));
 
   delete[] comm->userRedOps;

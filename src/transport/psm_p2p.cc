@@ -860,11 +860,18 @@ static ncclResult_t psmP2pSendProxyProgress(struct ncclProxyState* proxyState, s
 #endif
 
 static inline bool psmP2pProxyReady(struct ncclProxyArgs* args) {
-  return args->syncCond == NULL || args->syncCond->proxyReadyEvent.load(std::memory_order_acquire);
+  struct psmSyncCondition* syncCond = args->syncCond;
+  if (syncCond == NULL) return true;
+  return (int32_t)(__atomic_load_n(syncCond->readyFlag, __ATOMIC_ACQUIRE) - syncCond->seq) >= 0;
 }
 
 static inline void psmP2pProxyDone(struct ncclProxyArgs* args) {
-  if (args->syncCond) args->syncCond->proxyOpCount.fetch_sub(args->nsubs, std::memory_order_acq_rel);
+  struct psmSyncCondition* syncCond = args->syncCond;
+  if (syncCond == NULL) return;
+  if (syncCond->proxyOpCount.fetch_sub(args->nsubs, std::memory_order_acq_rel) - args->nsubs == 0) {
+    __atomic_store_n(syncCond->doneFlag, syncCond->seq, __ATOMIC_RELEASE);
+    delete syncCond;
+  }
 }
 
 static void psmP2pComputeChunkSize(struct ncclProxySubArgs* sub) {

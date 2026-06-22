@@ -818,6 +818,12 @@ struct ncclComm {
   struct ncclDevrState devrState; // The symmetric runtime state
   struct ncclSymkState symkState; // The symmetric kernels state (built on previous)
 
+  uint32_t* psmReadyFlag;       // host pointer (CPU side)
+  uint32_t* psmDoneFlag;        // host pointer (CPU side)
+  void* psmReadyFlagDev;        // device pointer for cuStreamWriteValue32 (cast to CUdeviceptr)
+  void* psmDoneFlagDev;         // device pointer for cuStreamWaitValue32 (cast to CUdeviceptr)
+  uint32_t psmSeqNum;
+
   uint64_t endMagic;
 };
 
