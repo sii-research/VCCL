@@ -508,7 +508,8 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
         int* peerRanks = ncclMemoryStackAlloc<int>(&comm->memScoped, sched.localRanks);
         int nPeersWithSignals = 0;
 
-        for (int lr = 0; lr < sched.localRanks; lr++) {
+        for (int i = 0; i < sched.localRanks; i++) {
+          int lr = (i + 1) % sched.localRanks;
           int sendRank = comm->localRankToRank[(sched.localRank + lr) % sched.localRanks];
           // Send part: sched.rank --> sendRank
           size_t sendCount = task->sendcounts[sched.rank * sched.nRanks + sendRank];
