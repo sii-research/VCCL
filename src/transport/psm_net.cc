@@ -1248,11 +1248,19 @@ static ncclResult_t recvProxyFree(struct ncclProxyConnection* connection, struct
 static_assert(PSM_NET_STEPS <= NCCL_NET_MAX_REQUESTS, "Not enough net requests to cover for steps");
 
 static inline bool psmNetProxyReady(struct ncclProxyArgs* args) {
-  return args->syncCond == NULL || args->syncCond->proxyReadyEvent.load(std::memory_order_acquire);
+  struct psmSyncCondition* syncCond = args->syncCond;
+  if (syncCond == NULL) return true;
+  // launchStream writes readyFlag = seq (cyclic) once sendbuff is ready; gate on readyFlag >= seq.
+  return (int32_t)(__atomic_load_n(syncCond->readyFlag, __ATOMIC_ACQUIRE) - syncCond->seq) >= 0;
 }
 
 static inline void psmNetProxyDone(struct ncclProxyArgs* args) {
-  if (args->syncCond) args->syncCond->proxyOpCount.fetch_sub(args->nsubs, std::memory_order_acq_rel);
+  struct psmSyncCondition* syncCond = args->syncCond;
+  if (syncCond == NULL) return;
+  if (syncCond->proxyOpCount.fetch_sub(args->nsubs, std::memory_order_acq_rel) - args->nsubs == 0) {
+    __atomic_store_n(syncCond->doneFlag, syncCond->seq, __ATOMIC_RELEASE);
+    delete syncCond;
+  }
 }
 
 static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct ncclProxyArgs* args) {
