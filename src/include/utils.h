@@ -34,6 +34,7 @@ uint64_t getHostHash();
 uint64_t getPidHash();
 uint64_t hashCombine(uint64_t baseHash, uint64_t value);
 ncclResult_t getRandomData(void* buffer, size_t bytes);
+int64_t genLogId();
 
 struct netIf {
   char prefix[64];
@@ -57,6 +58,21 @@ inline uint64_t clockNano() {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return uint64_t(ts.tv_sec)*1000*1000*1000 + ts.tv_nsec;
+}
+
+// Generate a low-cost pseudo-random identifier for logging. This is not
+// intended for cryptographic use or globally unique identifiers.
+inline int64_t genLogId() {
+  static thread_local uint64_t state = 0;
+  if (COMPILER_EXPECT(state == 0, false)) {
+    state = clockNano() ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&state));
+  }
+
+  // SplitMix64: fast state advancement and mixing with no synchronization.
+  uint64_t value = (state += 0x9e3779b97f4a7c15ULL);
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return static_cast<int64_t>(value ^ (value >> 31));
 }
 
 /* get any bytes of random data from /dev/urandom, return ncclSuccess (0) if it succeeds. */
