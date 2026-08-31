@@ -13,6 +13,8 @@
 #include "rma/rma.h"
 #include <functional>
 
+NCCL_PARAM(RmaCollSkipInitBarrier, "RMA_COLL_SKIP_INIT_BARRIER", 0);
+
 typedef ncclResult_t (*NcclRmaFunc_t)(struct ncclComm*, ncclRmaWork*, cudaStream_t);
 
 // Helper function to dump RMA task queue
@@ -502,7 +504,9 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
     struct ncclRmaWorkBatch* barrierBatch = nullptr;
     NCCLCHECK(allocRmaWorkBatch(comm, &barrierBatch));
     barrierBatch->logId = task->logId;
-    //NCCLCHECK(scheduleBarrierTasks(comm, task, plan, barrierBatch));
+    if (!ncclParamRmaCollSkipInitBarrier()) {
+      NCCLCHECK(scheduleBarrierTasks(comm, task, plan, barrierBatch));
+    }
 
     int batchIdx = 0;
     struct ncclRmaWorkBatch* curBatch = sched.batchesHead;
