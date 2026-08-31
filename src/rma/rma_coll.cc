@@ -222,7 +222,6 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
       batch->nProxyPut,
       ncclRmaPutProxy,
       [&](ncclRmaWork& w) {
-        w.rmaArgs->runParallel = 0; // rmaTasks in ProxyPut are run sequentially
         w.rmaArgs->nRmaTasksProxy = batch->nProxyPut;
         w.rmaTaskQueueProxy = batch->proxyPutQueue;
       },
