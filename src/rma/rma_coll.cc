@@ -370,6 +370,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
 
       struct ncclTaskRma* cePutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
       cePutTask->func = ncclFuncPutSignal;
+      cePutTask->logId = task->logId;
       cePutTask->ctx = 0;
       cePutTask->count = 0;
       cePutTask->datatype = task->datatype;
@@ -395,6 +396,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
     if (nLocalPeers > 0) {
       struct ncclTaskRma* ceWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
       ceWaitTask->func = ncclFuncWaitSignal;
+      ceWaitTask->logId = task->logId;
       ceWaitTask->ctx = 0;
       ceWaitTask->count = 0;
       ceWaitTask->datatype = task->datatype;
@@ -429,6 +431,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
 
         struct ncclTaskRma* proxyPutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
         proxyPutTask->func = ncclFuncPutSignal;
+        proxyPutTask->logId = task->logId;
         proxyPutTask->ctx = 0;
         proxyPutTask->count = 0;
         proxyPutTask->datatype = task->datatype;
@@ -454,6 +457,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
       if (nRemotePeers > 0) {
         struct ncclTaskRma* proxyWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
         proxyWaitTask->func = ncclFuncWaitSignal;
+        proxyWaitTask->logId = task->logId;
         proxyWaitTask->ctx = 0;
         proxyWaitTask->count = 0;
         proxyWaitTask->datatype = task->datatype;
