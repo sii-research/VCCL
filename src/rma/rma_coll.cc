@@ -13,6 +13,8 @@
 #include "rma/rma.h"
 #include <functional>
 
+NCCL_PARAM(RmaCollSkipInitBarrier, "RMA_COLL_SKIP_INIT_BARRIER", 1);
+
 typedef ncclResult_t (*NcclRmaFunc_t)(struct ncclComm*, ncclRmaWork*, cudaStream_t);
 
 // Helper function to dump RMA task queue
@@ -113,7 +115,7 @@ template <typename SetWorkFn>
 static ncclResult_t launchRmaOpHelper(struct ncclComm* comm, struct ncclRmaCollState* rmaCollState,
                     struct ncclRmaArgs* rmaArgs, cudaStream_t mainStream, int taskCount/*tasks of particular type*/,
                     NcclRmaFunc_t func/*Rma funcName*/, SetWorkFn setWorkField/*Lambda for setting tmpWork*/,
-                    int& opCnt) {
+                    cudaEvent_t opEvent, int& opCnt) {
   if (taskCount <= 0) {
     return ncclSuccess; // no need to update opCnt
   }
@@ -136,8 +138,7 @@ static ncclResult_t launchRmaOpHelper(struct ncclComm* comm, struct ncclRmaCollS
   } else {
     // Subsequent operations: launch on separate rmaCollStream with synchronization
     cudaStream_t opStream = rmaCollState->rmaCollStream[opCnt - 1];
-    cudaEvent_t opEvent = rmaCollState->rmaCollEvent[opCnt - 1];
-    CUDACHECK(cudaEventRecord(opEvent, mainStream));
+    assert(opEvent != nullptr);
     CUDACHECK(cudaStreamWaitEvent(opStream, opEvent, 0));
     NCCLCHECK(func(comm, &tmpWork, opStream));
   }
@@ -203,17 +204,30 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
     // }
     int opCnt = 0;  // Counter for number of operations launched in this batch
 
+    // Record one batch-level start event on main stream and reuse it for all
+    // secondary operation launches in this batch.
+    int activeOpTypes = 0;
+    activeOpTypes += (batch->nProxyPut > 0);
+    activeOpTypes += (batch->nProxyWaitSignal > 0);
+    activeOpTypes += (batch->nCePut > 0);
+    activeOpTypes += (batch->nCeWaitSignal > 0);
+    cudaEvent_t batchStartEvent = nullptr;
+    if (activeOpTypes > 1) {
+      // Use a dedicated event slot that is not used by per-stream completion sync.
+      batchStartEvent = rmaCollState->rmaCollEvent[NCCL_RMA_COLL_MAX_STREAMS - 1];
+      CUDACHECKGOTO(cudaEventRecord(batchStartEvent, mainStream), ret, fail);
+    }
+
     // Launch the four types of RMA operations in parallel:
     // 1. ProxyPut
     NCCLCHECKGOTO(launchRmaOpHelper(comm, rmaCollState, rmaArgs, mainStream,
       batch->nProxyPut,
       ncclRmaPutProxy,
       [&](ncclRmaWork& w) {
-        w.rmaArgs->runParallel = 0; // rmaTasks in ProxyPut are run sequentially
         w.rmaArgs->nRmaTasksProxy = batch->nProxyPut;
         w.rmaTaskQueueProxy = batch->proxyPutQueue;
       },
-      opCnt), ret, fail);
+      batchStartEvent, opCnt), ret, fail);
 
     // 2. ProxyWaitSignal
     NCCLCHECKGOTO(launchRmaOpHelper(comm, rmaCollState, rmaArgs, mainStream,
@@ -223,7 +237,7 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
         w.rmaArgs->nRmaTasksProxy = batch->nProxyWaitSignal;
         w.rmaTaskQueueProxy = batch->proxyWaitSignalQueue;
       },
-      opCnt), ret, fail);
+      batchStartEvent, opCnt), ret, fail);
 
     // 3. CePut
     NCCLCHECKGOTO(launchRmaOpHelper(comm, rmaCollState, rmaArgs, mainStream,
@@ -233,7 +247,7 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
         w.rmaArgs->nRmaTasksCe = batch->nCePut;
         w.rmaTaskQueueCe = batch->cePutQueue;
       },
-      opCnt), ret, fail);
+      batchStartEvent, opCnt), ret, fail);
 
     // 4. CeWaitSignal
     NCCLCHECKGOTO(launchRmaOpHelper(comm, rmaCollState, rmaArgs, mainStream,
@@ -243,7 +257,7 @@ ncclResult_t ncclLaunchRmaColl(struct ncclComm* comm, struct ncclKernelPlan* pla
         w.rmaArgs->nRmaTasksCe = batch->nCeWaitSignal;
         w.rmaTaskQueueCe = batch->ceWaitSignalQueue;
       },
-      opCnt), ret, fail);
+      batchStartEvent, opCnt), ret, fail);
 
     // Synchronize all secondary streams back to main stream
     for (int idx = 0; idx < opCnt - 1; idx++) {
@@ -356,6 +370,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
 
       struct ncclTaskRma* cePutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
       cePutTask->func = ncclFuncPutSignal;
+      cePutTask->logId = task->logId;
       cePutTask->ctx = 0;
       cePutTask->count = 0;
       cePutTask->datatype = task->datatype;
@@ -381,6 +396,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
     if (nLocalPeers > 0) {
       struct ncclTaskRma* ceWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
       ceWaitTask->func = ncclFuncWaitSignal;
+      ceWaitTask->logId = task->logId;
       ceWaitTask->ctx = 0;
       ceWaitTask->count = 0;
       ceWaitTask->datatype = task->datatype;
@@ -415,6 +431,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
 
         struct ncclTaskRma* proxyPutTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
         proxyPutTask->func = ncclFuncPutSignal;
+        proxyPutTask->logId = task->logId;
         proxyPutTask->ctx = 0;
         proxyPutTask->count = 0;
         proxyPutTask->datatype = task->datatype;
@@ -440,6 +457,7 @@ static ncclResult_t scheduleBarrierTasks(struct ncclComm* comm, struct ncclTaskR
       if (nRemotePeers > 0) {
         struct ncclTaskRma* proxyWaitTask = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
         proxyWaitTask->func = ncclFuncWaitSignal;
+        proxyWaitTask->logId = task->logId;
         proxyWaitTask->ctx = 0;
         proxyWaitTask->count = 0;
         proxyWaitTask->datatype = task->datatype;
@@ -490,7 +508,9 @@ ncclResult_t scheduleRmaCollTasksToPlan(struct ncclComm* comm, struct ncclKernel
     struct ncclRmaWorkBatch* barrierBatch = nullptr;
     NCCLCHECK(allocRmaWorkBatch(comm, &barrierBatch));
     barrierBatch->logId = task->logId;
-    NCCLCHECK(scheduleBarrierTasks(comm, task, plan, barrierBatch));
+    if (!ncclParamRmaCollSkipInitBarrier()) {
+      NCCLCHECK(scheduleBarrierTasks(comm, task, plan, barrierBatch));
+    }
 
     int batchIdx = 0;
     struct ncclRmaWorkBatch* curBatch = sched.batchesHead;

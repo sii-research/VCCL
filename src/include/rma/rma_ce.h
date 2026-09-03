@@ -24,6 +24,9 @@ struct ncclRmaCeCtx {
 
   // Per-rank sequence number for the signal operations
   uint64_t* signalOpSeqs;
+  // Device scratch slot holding the value injected into the stream for the
+  // signal write, avoiding a pageable host->device copy (implicit sync).
+  uint64_t* signalOpSeqsDev;
 
   // Signal memory layout and management
   // Each RMA context allocates a signal buffer with the following layout:

@@ -115,8 +115,7 @@ NCCL_API(ncclResult_t, ncclAlltoAllv, const void* sendbuff, const size_t* sendco
 ncclResult_t ncclAlltoAllv(const void* sendbuff, const size_t* sendcounts,
     const size_t* sdispls, void* recvbuff, const size_t* recvcounts, const size_t* rdispls,
     void* relaybuff, size_t relaycounts, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
-  int64_t logId = 0;
-  NCCLCHECK(getRandomData(&logId, sizeof(logId)));
+  int64_t logId = genLogId();
 
   // Calculate total send bytes for current rank: sum of all sendcounts for this rank
   size_t totalBytes = 0;
