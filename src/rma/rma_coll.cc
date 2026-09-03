@@ -13,7 +13,7 @@
 #include "rma/rma.h"
 #include <functional>
 
-NCCL_PARAM(RmaCollSkipInitBarrier, "RMA_COLL_SKIP_INIT_BARRIER", 0);
+NCCL_PARAM(RmaCollSkipInitBarrier, "RMA_COLL_SKIP_INIT_BARRIER", 1);
 
 typedef ncclResult_t (*NcclRmaFunc_t)(struct ncclComm*, ncclRmaWork*, cudaStream_t);
 
